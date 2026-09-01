@@ -15,12 +15,13 @@ authors:
   - family-names: "Carvalho"
     given-names: "Roberlan Oliveira de"
     affiliation: "Programa de Pós-Graduação em Informática (PPGI), Universidade Federal do Rio de Janeiro (UFRJ)"
-    orcid: "https://orcid.org/0009-0008-7724-3381"   # <-- preencha o seu ORCID
+    orcid: "https://orcid.org/0009-0008-7724-3381"
   - family-names: "Lima"
     given-names: "Josefino Cabral Melo"
     affiliation: "Programa de Pós-Graduação em Informática (PPGI), Universidade Federal do Rio de Janeiro (UFRJ)"
     orcid: "https://orcid.org/0000-0003-1754-1666"
 repository-code: "https://github.com/roberlancarvalho/pdac_multimodal_fl"
+doi: "10.5281/zenodo.22237065"
 license: MIT
 version: "0.1.0"
 date-released: "2026-09-01"
