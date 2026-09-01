@@ -252,4 +252,13 @@ de cada execução e aparece no painel em *Exportações*.
 - [ ] Privacidade: *secure aggregation* / DP-SGD (`flwr` + Opacus).
 - [ ] Estratégias para não-IID entre instituições (FedProx / FedBN).
 - [ ] Testes (`pytest`) para shapes dos ramos, máscara de modalidade e `cox_ph_loss`.
-```
+
+---
+
+## 8. Licença
+
+Código sob licença **MIT** — ver [`LICENSE`](LICENSE).
+
+Os **dados de pacientes não são cobertos** por esta licença e permanecem sob a
+LGPD e sob os termos dos comitês de ética e dos acordos de uso de dados de cada
+instituição participante.
