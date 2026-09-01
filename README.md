@@ -217,6 +217,11 @@ conectividade/TLS entre os nós.
 streamlit run streamlit_app.py     # abre em http://localhost:8501
 ```
 
+![Painel do Pipeline Multimodal Federado para PDAC](docs/interface.png)
+
+<sub>Execução sobre `SyntheticPDACDataset` (dados aleatórios) — as métricas não têm
+significado clínico, servem para demonstrar o painel.</sub>
+
 - **Barra lateral:** configura nº de clientes, rodadas, épocas locais, learning
   rate, estratégia (FedAvg/FedProx/FedAdam), amostras sintéticas e dropout de
   modalidade; **Iniciar simulação** dispara `federated/simulation.py` como
