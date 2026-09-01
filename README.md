@@ -34,10 +34,11 @@ log-hazard usado na perda de Cox.
 ```
 
 ### Ramo A — Radiômico 3D (`models/branch_a_radiomics.py`)
-- **Entrada:** volume de TC pré-processado, `(B, 1, D, H, W)` (ou `(B, 2, …)` para AP+VP).
-- **Backbone:** `DenseNet121` 3D da MONAI.
-- **Saída:** `(B, embed_dim)` — ou `(B, T, embed_dim)` (`return_tokens=True`), sequência
-  de tokens espaciais (`token_grid`, padrão 2×2×2 = 8) para a co-atenção com a histologia.
+- **Entrada:** `(B, n_phases, D, H, W)` — fases **AP + VP** (`radiomics_phases=2`).
+- **Backbone:** `DenseNet121` 3D da MONAI, **compartilhado entre as fases** (cada
+  fase passa pelo mesmo encoder; vetores combinados por média, tokens por concat).
+- **Saída:** `(B, embed_dim)` — ou `(B, n_phases·T, embed_dim)` (`return_tokens=True`),
+  tokens espaciais (`token_grid` 2×2×2) para a co-atenção com a histologia.
 - Pré-processamento esperado (offline): resample isotrópico, janelamento HU,
   crop/pad em torno da ROI pancreática.
 
@@ -49,13 +50,20 @@ log-hazard usado na perda de Cox.
   usa `histology_tokens` *slots* aprendíveis → `(B, K, embed_dim)` tokens histológicos.
 - **Saída:** `(B, embed_dim)` (ou `(B, K, embed_dim)`) + pesos de atenção por patch.
 
+### Ramo D — Clínico Tabular (`models/branch_d_clinical.py`)
+- **Entrada:** `clinical_num (B, n_cont)` (contínuas, já em z-score) + `clinical_cat (B, n_cat)` (categóricas 0..k-1).
+- Embedding de identidade por campo + `nn.Embedding` por categórica → 1 token/campo.
+- Ativado por `enable_clinical` (config). Não está na Seção 6.1 estrita, mas na
+  proposta geral e nos modelos "Patologia+Clínica" da revisão.
+
 ### Ramo C — Genômico Tabular (`models/branch_c_genomics.py`)
-- **Entrada:** `(B, 4)` `long` — status mutacional de `[KRAS, TP53, SMAD4, CDKN2A]`
-  (`0` = wild-type, `1` = mutado, `2` = desconhecido/não sequenciado).
-- Um `nn.Embedding` aprendível por `(gene, estado)`.
+- **Entrada:** por gene `[KRAS, TP53, SMAD4, CDKN2A]` — `mutation_status` (wt/mut/
+  desconhecido), `variant_type` (missense/nonsense/frameshift/splice/outra) e
+  `vaf` ∈ [0,1]. Só `mutation_status` é obrigatório.
+- Embeddings aprendíveis por `(gene, estado)` e `(gene, tipo de variante)` +
+  projeção da VAF, somados por gene.
 - **Saída:** `(B, embed_dim)` (via MLP) — ou `(B, 4, embed_dim)` (`return_tokens=True`),
   um token por gene *driver*.
-- *TODO:* tipo de variante + frequência alélica (VAF).
 
 ### Fusão (`models/fusion_coattention.py` · `fusion_attention.py`)
 Dois modos (`fusion_mode` em `configs/default.yaml`):
@@ -70,15 +78,31 @@ Dois modos (`fusion_mode` em `configs/default.yaml`):
 - **Saída:** `risk (B, n_outputs)`, `fused (B, embed_dim)`.
 
 ### Modelo completo (`models/multimodal_pdac.py`)
-`MultimodalPDACModel` orquestra os quatro módulos. É esta `nn.Module` cujos
-pesos o Flower serializa e agrega. Cada ramo pode ser **congelado**
-individualmente (`freeze_radiomics`, `freeze_histology`, `freeze_genomics`) para
-treinar apenas a fusão.
+`MultimodalPDACModel` orquestra os quatro módulos e, sobre a representação
+fundida, as **três tarefas clínicas da Figura 4**:
+- **prognóstico** — `risk` (log-hazard, perda de Cox);
+- **diagnóstico** — `dx_logit` (PDAC vs não-PDAC, BCE) — `enable_diagnosis`;
+- **subtipagem molecular** — `subtype_logits` (classical/basal-like, cross-entropy) — `enable_subtype`.
+
+Perda multitarefa em `utils.losses.multitask_loss` (pesos `w_diagnosis`,
+`w_subtype`; rótulos ausentes mascarados). Avaliação: C-index · AUC (diagnóstico)
+· acurácia (subtipo). É esta `nn.Module` cujos pesos o Flower agrega; cada ramo
+pode ser **congelado** (`freeze_*`) para treinar apenas a fusão + cabeças.
 
 ### Aprendizado Federado (`federated/`)
 - `server.py` — `start_server` + estratégia (`FedAvg` / `FedProx` / `FedAdam`),
-  agregação de C-index ponderada por nº de amostras. **Nenhum dado de paciente
-  passa pelo servidor.**
+  agregação de métricas ponderada por nº de amostras (denominador por chave).
+  **Nenhum dado de paciente passa pelo servidor.**
+  - **DP-FedAvg** (`federated.dp.enabled`) — clipping fixo da atualização de cada
+    cliente + ruído gaussiano no agregado, no servidor
+    (`DifferentialPrivacyServerSideFixedClipping`). O **orçamento ε** (RDP,
+    Opacus) é estimado em `federated/privacy.py` e aparece no painel/`config.json`.
+  - **FedBN** (`federated.fedbn`) — camadas BatchNorm ficam locais a cada cliente
+    (Li et al. 2021); mitiga *shift* de distribuição entre instituições (não-IID).
+  - **Avaliação centralizada** (`federated.central_eval`) — a cada rodada (e nos
+    pesos iniciais) o modelo global é avaliado no servidor sobre uma coorte
+    held-out; métricas `central_*` (C-index, AUC, acurácia) no painel/TensorBoard,
+    lado a lado com a avaliação distribuída.
 - `client.py` — `NumPyClient`: recebe pesos globais → treina local
   (`local_epochs`) → devolve pesos + métricas.
 - `engine.py` — laços de treino/avaliação (perda de Cox, C-index).
@@ -94,7 +118,9 @@ pdac_multimodal_fl/
 ├── configs/
 │   └── default.yaml          # hiperparâmetros de modelo / treino / federação
 ├── data/
-│   ├── dataset.py            # MultimodalPDACDataset (real, a implementar) + SyntheticPDACDataset
+│   ├── dataset.py            # MultimodalPDACDataset (manifesto CSV) + SyntheticPDACDataset
+│   ├── preprocessing.py      # ct_transforms (MONAI) · load_patch_embeddings · parse_mutations
+│   ├── manifest_template.csv # exemplo de manifesto
 │   ├── raw/                  # dados brutos por instituição — NÃO versionado
 │   └── processed/            # dados pré-processados — NÃO versionado
 ├── models/
@@ -225,20 +251,61 @@ Registrado por execução em `outputs/<run>/tb/`:
 O gráfico **`c_index.png`** (C-index + perdas de Cox × rodada) é gerado ao final
 de cada execução e aparece no painel em *Exportações*.
 
+### 4.6 Explicabilidade (`utils/xai.py`, aba do painel)
+
+- **Grad-CAM 3D** no Ramo A — retropropaga o risco fundido até o mapa de features
+  do DenseNet3D; heatmap sobreposto a uma fatia da TC.
+- **SHAP genômico** no Ramo C — valores SHAP por gene *driver* (KRAS/TP53/SMAD4/
+  CDKN2A) sobre a cabeça de risco **unimodal** da fusão (`fusion_aux_heads=true`).
+
+### 4.7 Balanceamento entre modalidades
+
+`utils.losses.multimodal_cox_loss` soma à perda de Cox da fusão: `lambda_aux` ×
+(média das perdas de Cox unimodais) + `lambda_balance` × (variância entre elas).
+Cabeças unimodais vêm de `fusion_aux_heads`. O peso do token `[FUSION]` sobre cada
+modalidade (`modality_gate`) é agregado por rodada e mostrado no painel/TensorBoard.
+
+### 4.8 Testes e lint
+
+```bash
+ruff check .        # lint (config em ruff.toml)
+pytest              # suíte em tests/ (~30 testes; shapes dos ramos, fusão,
+                    # máscara de modalidade, perdas, engine, federado, XAI)
+```
+
+CI em `.github/workflows/ci.yml` (ruff + pytest a cada push/PR na `main`).
+
 ---
 
 ## 5. Ligando os seus dados
 
-1. Pré-processe **offline**, em cada instituição:
-   - TC → NIfTI resampleado + crop da ROI pancreática (`data/processed/ct/`);
-   - WSI → patches → `embeddings` do *foundation model* (`data/processed/wsi_emb/`);
-   - painel genético → colunas `KRAS, TP53, SMAD4, CDKN2A` ∈ {0,1,2}.
-2. Monte um **manifesto CSV** por instituição (1 linha por paciente) com os
-   caminhos e os rótulos de sobrevida (`time`, `event`).
-3. Implemente o carregamento em `MultimodalPDACDataset.__getitem__`
-   (`data/dataset.py`) retornando o `dict` documentado no topo do arquivo.
-4. Aponte `data.manifest_csv` / `data.data_root` no `configs/default.yaml` e
-   troque o `build_dataloaders` em `federated/client.py`.
+`MultimodalPDACDataset` (`data/dataset.py`) + `data/preprocessing.py` já
+implementam o carregamento a partir de um **manifesto CSV**
+(`data/manifest_template.csv`). Colunas — as de modalidade são opcionais
+(célula vazia = modalidade ausente):
+
+| coluna | conteúdo |
+|---|---|
+| `patient_id` | obrigatória |
+| `ct_ap`, `ct_vp` **ou** `ct_path` | NIfTI de TC (fases AP/VP, ou 1 volume) |
+| `wsi_emb` | `.npy`/`.pt` com os embeddings de patches `(N, F)` (UNI/Virchow, offline) |
+| `mutations` **ou** `<GENE>_status`,`<GENE>_vtype`,`<GENE>_vaf` | MAF (TCGA) / CSV, ou colunas diretas |
+| `time`, `event` | sobrevida |
+| `dx`, `subtype` | diagnóstico (0/1) e subtipo (0/1); vazio/`-1` = desconhecido |
+| `split` | `train` / `val` / `test` |
+
+O pré-processamento da TC (`ct_transforms`: resample isotrópico → janelamento HU
+pancreático → crop da ROI → resize) roda **na hora** no `Dataset`; a extração de
+patches/embeddings da WSI é feita **offline** (fora deste repo).
+
+Passos:
+
+1. Gere os arquivos por paciente e o `manifest.csv`.
+2. Aponte `data.manifest_csv` / `data.data_root` em `configs/default.yaml`
+   (e `federated.central_eval.manifest` para a coorte held-out do servidor).
+3. Rode `python -m federated.simulation --config <seu>.yaml ...` — o
+   `build_dataloaders` já usa `MultimodalPDACDataset` quando `manifest_csv` está
+   preenchido (senão, cai no `SyntheticPDACDataset`).
 
 ---
 
@@ -261,11 +328,28 @@ Alinhamento com a Seção 6.1 do artigo:
 - [x] Fusão por **co-atenção cross-modal par-a-par (MCAT)** — `fusion_coattention.py`.
 - [x] Ramo A emite **tokens espaciais**; Ramo B emite **K tokens** histológicos;
   Ramo C emite **1 token por gene** *driver*.
-- [ ] Ramo A: fases **AP + VP** com encoder compartilhado (hoje: `ct_in_channels=2`).
-- [ ] Ramo C: **tipo de variante + VAF** além do status mutacional.
-- [ ] Regularização de **balanceamento entre modalidades** no treino.
-- [ ] Explicabilidade: **SHAP** (Ramo C + clínico) e **Grad-CAM 3D** (Ramo A).
-- [ ] Cabeças **multitarefa**: diagnóstico + subtipagem molecular + prognóstico.
+- [x] Regularização de **balanceamento entre modalidades** no treino
+  (`multimodal_cox_loss`: cabeças unimodais + `lambda_aux`/`lambda_balance`;
+  `modality_gate` por rodada no painel/TensorBoard).
+- [x] Explicabilidade: **SHAP** genômico (Ramo C) e **Grad-CAM 3D** (Ramo A) —
+  `utils/xai.py` + aba *Explicabilidade* do painel.
+- [x] Ramo A: fases **AP + VP** com **encoder 3D compartilhado** (`radiomics_phases=2`).
+- [x] Ramo C: **tipo de variante + VAF** além do status mutacional.
+- [x] Cabeças **multitarefa**: prognóstico + diagnóstico + subtipagem molecular
+  (Figura 4) — `multitask_loss`; AUC/acurácia por rodada no painel/TensorBoard.
+- [x] Privacidade: **DP-FedAvg** (server-side fixed clipping + ruído) — `federated.dp`.
+- [x] Não-IID: **FedBN** (BatchNorm local por cliente) — `federated.fedbn`.
+- [x] **Avaliação centralizada no servidor** (`federated.central_eval`) — métricas `central_*`.
+- [x] Testes **`pytest`** (`tests/`, 34 testes) + **CI** (`.github/workflows/ci.yml`) + `ruff`.
+- [x] **`MultimodalPDACDataset`** (manifesto CSV) + **`data/preprocessing.py`**
+  (MONAI transforms de TC, pad de patches de WSI, parser MAF/CSV de mutações).
+- [x] **Ramo D clínico** + **SHAP clínico** (`utils/xai.clinical_shap`, aba do painel).
+- [x] Contador de **ε** (RDP, Opacus) — `federated/privacy.py`.
+- [x] *Scaffold* de extração de patches/embeddings de WSI (`data/wsi_patching.py`,
+  encoders UNI/Virchow/CONCH plugáveis; **rodar offline, fora do repo**).
+- [ ] *Secure aggregation* (SecAgg+) — exige migrar p/ `flwr run` / `ServerApp`.
+- [ ] Rodar com **dados reais** + **validação externa multicêntrica** → ver
+  [`docs/GUIA_DE_DADOS.md`](docs/GUIA_DE_DADOS.md) (o que cabe a você fazer).
 
 Geral:
 

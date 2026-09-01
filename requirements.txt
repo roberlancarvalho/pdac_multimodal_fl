@@ -17,11 +17,13 @@ einops>=0.7
 # --- Aprendizado Federado ---
 flwr[simulation]>=1.7
 ray>=2.31            # backend da simulação do Flower (flwr[simulation])
+opacus>=1.4         # contador de ε (RDP) para o DP-FedAvg
 
 # --- Painel / visualização ---
 streamlit>=1.57
 tensorboard>=2.16    # curvas por rodada, histogramas de pesos e de atenção
 matplotlib>=3.8      # gráfico C-index x rodada (outputs/<run>/c_index.png)
+shap>=0.45           # explicabilidade genômica (aba Explicabilidade do painel)
 
 # --- Dados tabulares / genômica / métricas ---
 pandas>=2.1

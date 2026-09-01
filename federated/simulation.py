@@ -70,7 +70,7 @@ def main() -> None:
             config=fl.server.ServerConfig(num_rounds=num_rounds),
             strategy=strategy,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if recorder is not None:
             recorder.finish(error=f"{type(exc).__name__}: {exc}")
         traceback.print_exc()

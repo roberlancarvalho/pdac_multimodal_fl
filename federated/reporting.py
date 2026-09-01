@@ -33,6 +33,8 @@ from typing import Any
 from flwr.common import parameters_to_ndarrays
 from flwr.server.strategy import Strategy
 
+from models.fusion_attention import MODALITIES
+
 # Bag sintética fixa para acompanhar a evolução da atenção do Ramo B entre rodadas.
 _ATTENTION_PROBE_PATCHES = 128
 _ATTENTION_PROBE_SEED = 0
@@ -55,6 +57,20 @@ class RunRecorder:
         self._last_model = None  # nn.Module do último modelo global agregado
         self._t0 = time.time()
 
+        # Orçamento de privacidade (ε) quando DP-FedAvg está ligado.
+        self.epsilon: float | None = None
+        dp = (cfg["federated"].get("dp") or {})
+        if dp.get("enabled"):
+            from federated.privacy import epsilon_estimate
+
+            self.epsilon = epsilon_estimate(
+                noise_multiplier=dp.get("noise_multiplier", 1.0),
+                num_rounds=num_rounds,
+                sample_rate=cfg["federated"].get("fraction_fit", 1.0),
+            )
+            if self.epsilon is not None:
+                print(f"[DP] epsilon ~ {self.epsilon:.2f} (delta=1e-5) apos {num_rounds} rodadas")
+
         (self.run_dir / "config.json").write_text(
             json.dumps(
                 {
@@ -64,6 +80,7 @@ class RunRecorder:
                     "data": cfg["data"],
                     "num_clients": num_clients,
                     "num_rounds": num_rounds,
+                    "dp_epsilon": self.epsilon,
                     "started": self._t0,
                 },
                 indent=2,
@@ -101,12 +118,35 @@ class RunRecorder:
         entry["fit_clients"] = per_client
         self._register_clients(per_client)
 
+    def record_central(self, rnd: int, loss: float | None, metrics: dict[str, Any]) -> None:
+        """Avaliação centralizada no servidor (Flower `evaluate_fn`)."""
+        entry = self._buffer.setdefault(rnd, {"round": rnd})
+        entry["central_loss"] = _as_float(loss)
+        for key, value in (metrics or {}).items():
+            if key.startswith("central_"):
+                entry[key] = _as_float(value)
+        if rnd == 0:  # avaliação dos pesos iniciais -- não há record_evaluate p/ a rodada 0
+            with self.history_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+            self._log_tensorboard(0, entry)
+            self._buffer.pop(0, None)
+
     def record_evaluate(
         self, rnd: int, agg_loss: float | None, aggregated: dict[str, Any], per_client: list[dict]
     ) -> None:
         entry = self._buffer.setdefault(rnd, {"round": rnd})
         entry["eval_loss"] = _as_float(agg_loss)
         entry["c_index"] = _get_float(aggregated, "c_index")
+        for key in ("auc_dx", "acc_subtype"):
+            if key in (aggregated or {}):
+                entry[key] = _get_float(aggregated, key)
+        gate = {
+            m: _get_float(aggregated, f"gate_{m}")
+            for m in MODALITIES
+            if f"gate_{m}" in (aggregated or {})
+        }
+        if gate:
+            entry["modality_gate"] = gate
         entry["eval_clients"] = per_client
         entry["wall_time"] = time.time()
         self._register_clients(per_client)
@@ -134,7 +174,7 @@ class RunRecorder:
                 self.model_path,
             )
             self._last_model = model
-        except Exception:  # noqa: BLE001 -- salvar o modelo é best-effort
+        except Exception:
             self._last_model = None
 
     # -- helpers internos --------------------------------------------------------
@@ -150,6 +190,13 @@ class RunRecorder:
         self._tb.scalar("global/c_index", entry.get("c_index"), rnd)
         self._tb.scalar("global/loss_eval", entry.get("eval_loss"), rnd)
         self._tb.scalar("global/loss_train", entry.get("train_loss"), rnd)
+        self._tb.scalar("global/auc_dx", entry.get("auc_dx"), rnd)
+        self._tb.scalar("global/acc_subtype", entry.get("acc_subtype"), rnd)
+        for key, value in entry.items():
+            if key.startswith("central_"):
+                self._tb.scalar(f"central/{key[len('central_'):]}", value, rnd)
+        for m, g in entry.get("modality_gate", {}).items():
+            self._tb.scalar(f"modality_gate/{m}", g, rnd)
 
         fit_loss = {c["cid"]: c.get("train_loss") for c in entry.get("fit_clients", [])}
         for c in entry.get("eval_clients", []):
@@ -204,7 +251,7 @@ class RunRecorder:
             fig.tight_layout()
             fig.savefig(self.png_path, dpi=150)
             plt.close(fig)
-        except Exception:  # noqa: BLE001 -- o PNG é um extra
+        except Exception:
             pass
 
 
@@ -219,7 +266,7 @@ class _TensorBoard:
 
             self.writer = SummaryWriter(log_dir=str(log_dir))
             self.enabled = True
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     def scalar(self, tag: str, value: Any, step: int) -> None:
@@ -238,7 +285,7 @@ class _TensorBoard:
                 flat = torch.cat(tensors)
                 if flat.numel():
                     self.writer.add_histogram(f"weights/{group}", flat, step)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     def attention_histogram(self, model, patch_feat_dim: int, step: int) -> float | None:
@@ -255,7 +302,7 @@ class _TensorBoard:
                 self.writer.add_histogram("attention_branch_b/weights", attn, step)
             entropy = float(-(attn * attn.log()).sum())
             return entropy / math.log(_ATTENTION_PROBE_PATCHES)  # 1.0 = uniforme, ~0 = concentrada
-        except Exception:  # noqa: BLE001
+        except Exception:
             return None
 
     def close(self) -> None:
@@ -263,7 +310,7 @@ class _TensorBoard:
             try:
                 self.writer.flush()
                 self.writer.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
 
@@ -315,7 +362,11 @@ class RecordingStrategy(Strategy):
         return aggregated
 
     def evaluate(self, server_round, parameters):
-        return self.inner.evaluate(server_round, parameters)
+        result = self.inner.evaluate(server_round, parameters)
+        if result is not None:
+            loss, metrics = result
+            self.recorder.record_central(server_round, loss, metrics or {})
+        return result
 
 
 def _as_float(value: Any) -> float | None:

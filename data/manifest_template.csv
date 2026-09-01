@@ -1,0 +1,5 @@
+patient_id,ct_ap,ct_vp,wsi_emb,mutations,time,event,dx,subtype,split
+PDAC-0001,ct/PDAC-0001_AP.nii.gz,ct/PDAC-0001_VP.nii.gz,wsi_emb/PDAC-0001.npy,mutations/PDAC-0001.maf,14.2,1,1,1,train
+PDAC-0002,ct/PDAC-0002_AP.nii.gz,ct/PDAC-0002_VP.nii.gz,,mutations/PDAC-0002.maf,31.0,0,1,0,train
+PDAC-0003,,,wsi_emb/PDAC-0003.npy,,8.5,1,1,,val
+PDAC-0004,ct/PDAC-0004.nii.gz,,,mutations/PDAC-0004.csv,44.7,1,1,1,val

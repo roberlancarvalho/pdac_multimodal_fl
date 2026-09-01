@@ -4,9 +4,18 @@
 model:
   embed_dim: 256
   patch_feat_dim: 1024        # dimensão do embedding de patch do foundation model (UNI=1024)
-  ct_in_channels: 1           # 1 = single-phase; 2 = fases AP + VP (encoder compartilhado)
+  ct_in_channels: 2           # n_phases * canais/fase
+  radiomics_phases: 2         # 2 = fases AP + VP num encoder 3D compartilhado
   n_genes: 4
   n_gene_states: 3            # 0=wt, 1=mut, 2=desconhecido
+  genomics_use_variant_type: true   # tipo de variante (missense/nonsense/frameshift/...)
+  genomics_use_vaf: true            # frequência alélica (VAF)
+  enable_clinical: true             # Ramo D -- variáveis clínicas tabulares
+  clinical_n_continuous: 5          # deve casar com len(data.clinical_continuous_cols)
+  clinical_cat_cardinalities: [2, 4, 5, 3]   # nº de categorias por campo categórico
+  enable_diagnosis: true            # cabeça de diagnóstico (PDAC vs não-PDAC) -- Fig. 4
+  enable_subtype: true              # cabeça de subtipagem molecular -- Fig. 4
+  n_subtypes: 2                     # 0=classical, 1=basal-like
   fusion_layers: 2
   fusion_heads: 8
   dropout: 0.2
@@ -17,6 +26,7 @@ model:
   radiomics_token_grid: [2, 2, 2]   # tokens espaciais do Ramo A (8) p/ a co-atenção
   histology_tokens: 8               # tokens histológicos do Ramo B p/ a co-atenção
   fusion_genomics_query_only: false # true = genômica só como Query (não vira K/V)
+  fusion_aux_heads: true            # cabeças de risco unimodais (balanceamento de modalidades)
   freeze_radiomics: false
   freeze_histology: false
   freeze_genomics: false
@@ -27,6 +37,13 @@ train:
   lr: 0.0003
   weight_decay: 0.0001
   seed: 42
+  # Regularização de balanceamento entre modalidades (mecanismo iii da Seção 6.1).
+  # Requer model.fusion_aux_heads=true. Zerar ambos = só a perda de Cox da fusão.
+  lambda_aux: 0.3        # peso da média das perdas de Cox unimodais
+  lambda_balance: 0.1    # peso da variância entre as perdas de Cox unimodais
+  # Pesos das tarefas clínicas adicionais (Figura 4). 0 = desliga a tarefa.
+  w_diagnosis: 0.5      # BCE do diagnóstico
+  w_subtype: 0.3        # cross-entropy da subtipagem molecular
 
 federated:
   server_address: "0.0.0.0:8080"
@@ -37,11 +54,26 @@ federated:
   min_evaluate_clients: 2
   min_available_clients: 2
   strategy: "FedAvg"          # FedAvg | FedProx | FedAdam
+  fedbn: false               # true = camadas BatchNorm ficam locais (Li et al. 2021, não-IID)
+  dp:                        # DP-FedAvg (server-side fixed clipping)
+    enabled: false
+    clip_norm: 1.0           # norma L2 máxima da atualização por cliente
+    noise_multiplier: 1.0    # σ = noise_multiplier * clip_norm / num_clients
+  central_eval:             # avaliação centralizada: modelo global x coorte do servidor
+    enabled: true
+    samples: 96             # coorte sintética (usada quando `manifest` está vazio)
+    seed: 999               # disjunta das seeds dos clientes
+    manifest: ""            # CSV da coorte held-out do servidor (validação externa)
+    split: "val"            # linha `split` do manifesto a usar
 
 data:
-  # Cada cliente aponta para o seu próprio manifesto; deixe em branco para usar
-  # o SyntheticPDACDataset (smoke test).
+  # Manifesto CSV desta instituição (NUNCA sai daqui). Vazio = SyntheticPDACDataset.
+  # Colunas: patient_id | ct_ap,ct_vp OU ct_path | wsi_emb | mutations OU <GENE>_status/_vtype/_vaf
+  #          | time,event | dx | subtype | split(train/val/test)
   manifest_csv: ""
   data_root: "./data/processed"
   synthetic_samples: 64
   modality_dropout: 0.1       # fração de modalidades ausentes no dataset sintético
+  # Colunas clínicas do manifesto (padronize contínuas offline; codifique categóricas 0..n-1).
+  clinical_continuous_cols: []   # ex.: [age, ca19_9, bmi, tumor_size_mm, albumin]
+  clinical_categorical_cols: []  # ex.: [sex, ajcc_stage, ecog_ps, tumor_location]

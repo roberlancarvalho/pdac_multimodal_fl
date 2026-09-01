@@ -27,12 +27,16 @@ Saída (forward): dict com
     "fused":         Tensor (B, D)         -- representação multimodal fundida.
     "modality_gate": dict[str, Tensor (B,)] -- peso do token [FUSION] sobre cada
         modalidade presente (interpretabilidade: contribuição por modalidade).
+    "aux_risk":      dict[str, Tensor (B, n_outputs)] -- se `aux_heads=True`, um
+        log-hazard unimodal por modalidade presente. Usado por
+        `utils.losses.multimodal_cox_loss` para a regularização de balanceamento
+        entre modalidades (mecanismo iii da Seção 6.1).
 """
 
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from models.fusion_attention import MODALITIES
 
@@ -93,11 +97,13 @@ class CrossModalCoAttentionFusion(nn.Module):
         dropout: float = 0.2,
         n_outputs: int = 1,
         genomics_query_only: bool = False,
+        aux_heads: bool = True,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
         self.modalities = MODALITIES
         self.genomics_query_only = genomics_query_only
+        self.aux_heads = aux_heads
 
         self.type_embed = nn.ParameterDict(
             {m: nn.Parameter(torch.zeros(1, 1, embed_dim)) for m in self.modalities}
@@ -142,6 +148,15 @@ class CrossModalCoAttentionFusion(nn.Module):
             nn.Linear(embed_dim // 2, n_outputs),
         )
 
+        # Cabeças de risco unimodais (regularização de balanceamento entre modalidades).
+        if aux_heads:
+            self.aux_risk = nn.ModuleDict(
+                {
+                    m: nn.Sequential(nn.LayerNorm(embed_dim), nn.Linear(embed_dim, n_outputs))
+                    for m in self.modalities
+                }
+            )
+
     @staticmethod
     def _cross(block, q, kv, kv_present):
         """Aplica um bloco de co-atenção com máscara de presença POR AMOSTRA da modalidade K/V."""
@@ -169,7 +184,11 @@ class CrossModalCoAttentionFusion(nn.Module):
 
         if present is None:
             present = torch.ones(b, len(self.modalities), dtype=torch.bool, device=device)
-        pres = {m: present[:, i] for i, m in enumerate(self.modalities)}
+        pres = {
+            m: (present[:, i] if i < present.shape[1]
+                else torch.zeros(b, dtype=torch.bool, device=device))
+            for i, m in enumerate(self.modalities)
+        }
 
         # Normaliza + tipo de modalidade; sanitiza NaN/Inf de amostras sem a modalidade.
         h = {
@@ -190,12 +209,15 @@ class CrossModalCoAttentionFusion(nn.Module):
 
         # Pool por modalidade -> (B, 1, D) cada; empilha na ordem canônica.
         pooled, order = [], []
+        aux_risk: dict[str, torch.Tensor] = {}
         for m in self.modalities:
             if m in active:
                 q = self.pool_query[m].expand(b, -1, -1)
                 vec, _ = self.pool_attn[m](q, h[m], h[m], need_weights=False)
                 pooled.append(vec)
                 order.append(m)
+                if self.aux_heads:
+                    aux_risk[m] = self.aux_risk[m](vec.squeeze(1))  # (B, n_outputs)
         pooled = torch.cat(pooled, dim=1)  # (B, M_active, D)
 
         # Máscara de presença por amostra para a leitura final.
@@ -215,7 +237,10 @@ class CrossModalCoAttentionFusion(nn.Module):
         risk = self.risk_head(fused)
 
         modality_gate = {m: gate[:, 0, i] for i, m in enumerate(order)}
-        return {"risk": risk, "fused": fused, "modality_gate": modality_gate}
+        out = {"risk": risk, "fused": fused, "modality_gate": modality_gate}
+        if self.aux_heads:
+            out["aux_risk"] = aux_risk
+        return out
 
 
 if __name__ == "__main__":
@@ -228,6 +253,7 @@ if __name__ == "__main__":
     out = fusion(tok)
     print("Co-atenção -- risco:", out["risk"].shape, "| fundido:", out["fused"].shape)
     print("modality_gate:", {k: tuple(v.shape) for k, v in out["modality_gate"].items()})
+    print("aux_risk:", {k: tuple(v.shape) for k, v in out["aux_risk"].items()})
 
     # Paciente 2 sem histologia (presença por amostra):
     present = torch.tensor([[True, True, True], [True, False, True]])

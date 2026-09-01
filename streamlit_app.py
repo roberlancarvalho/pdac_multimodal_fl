@@ -308,6 +308,20 @@ with st.sidebar:
             "desvio do modelo global (bom p/ dados não-IID); FedAdam usa momento no "
             "servidor.",
         )
+        fedbn = st.toggle(
+            "FedBN (BatchNorm local)", value=False,
+            help="Mantém as camadas BatchNorm de cada cliente locais — mitiga "
+            "*shift* de distribuição entre instituições (não-IID; Li et al. 2021).",
+        )
+        dp_enabled = st.toggle(
+            "DP-FedAvg (privacidade)", value=False,
+            help="Clipping da atualização de cada cliente + ruído gaussiano no "
+            "agregado (servidor) — treinamento com privacidade / LGPD.",
+        )
+        dp_noise = st.slider(
+            "σ (noise multiplier)", 0.0, 4.0, 1.0, step=0.25, disabled=not dp_enabled,
+            help="Mais ruído = mais privacidade, menos utilidade.",
+        )
         synthetic_samples = st.slider(
             "Amostras sintéticas (pool)", 16, 256, 64, step=16,
             help="Tamanho do dataset sintético repartido entre os clientes "
@@ -317,6 +331,17 @@ with st.sidebar:
             "Dropout de modalidade", 0.0, 0.5, 0.1, step=0.05,
             help="Fração de modalidades ausentes por paciente — simula coortes "
             "incompletas. A fusão lida com modalidade faltante via máscara.",
+        )
+        lambda_aux = st.slider(
+            "λ balanceamento — cabeças unimodais", 0.0, 1.0, 0.3, step=0.1,
+            help="Peso da média das perdas de Cox unimodais. Força cada modalidade "
+            "(radiômica, histologia, genômica) a ser individualmente preditiva "
+            "(mecanismo iii da Seção 6.1).",
+        )
+        lambda_balance = st.slider(
+            "λ balanceamento — variância", 0.0, 1.0, 0.1, step=0.1,
+            help="Peso da variância entre as perdas unimodais. Penaliza uma "
+            "modalidade carregar o modelo sozinha.",
         )
         seed = int(st.number_input(
             "Seed", value=42, step=1, help="Semente de aleatoriedade (reprodutibilidade)."
@@ -339,8 +364,19 @@ with st.sidebar:
 if submitted:
     launch_run(
         overrides={
-            "train": {"local_epochs": local_epochs, "lr": float(lr), "seed": seed},
-            "federated": {"strategy": strategy or "FedAvg"},
+            "train": {
+                "local_epochs": local_epochs, "lr": float(lr), "seed": seed,
+                "lambda_aux": float(lambda_aux), "lambda_balance": float(lambda_balance),
+            },
+            "federated": {
+                "strategy": strategy or "FedAvg",
+                "fedbn": bool(fedbn),
+                "dp": {
+                    "enabled": bool(dp_enabled),
+                    "clip_norm": 1.0,
+                    "noise_multiplier": float(dp_noise),
+                },
+            },
             "data": {
                 "synthetic_samples": synthetic_samples,
                 "modality_dropout": modality_dropout,
@@ -388,7 +424,9 @@ selected_run = Path(
     )
 )
 
-tab_train, tab_attention = st.tabs(["Treino federado", "Atenção — histopatologia"])
+tab_train, tab_attention, tab_xai = st.tabs(
+    ["Treino federado", "Atenção — histopatologia", "Explicabilidade — SHAP · Grad-CAM"]
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -409,11 +447,22 @@ def render_training(run_dir: Path) -> None:
         "failed": ":material/error: falhou",
     }.get(state, state)
 
+    fed_cfg = cfg.get("federated", {})
+    flags = []
+    if fed_cfg.get("fedbn"):
+        flags.append("FedBN")
+    if (fed_cfg.get("dp") or {}).get("enabled"):
+        dp_flag = f"DP σ={fed_cfg['dp'].get('noise_multiplier', 1.0)}"
+        if cfg.get("dp_epsilon") is not None:
+            dp_flag += f" (ε≈{cfg['dp_epsilon']:.1f})"
+        flags.append(dp_flag)
+
     top = st.container(horizontal=True)
     top.markdown(f"**Status:** {badge}")
     top.markdown(f"**Rodada:** {done_round}/{total_rounds}")
     top.markdown(f"**Clientes:** {cfg.get('num_clients', '?')}")
-    top.markdown(f"**Estratégia:** {cfg.get('federated', {}).get('strategy', '?')}")
+    top.markdown(f"**Estratégia:** {fed_cfg.get('strategy', '?')}"
+                 + (f" · {' · '.join(flags)}" if flags else ""))
     top.markdown(f"**Tempo:** {status.get('elapsed_s', 0)}s")
 
     if total_rounds:
@@ -472,15 +521,53 @@ def render_training(run_dir: Path) -> None:
             help="Mesma perda, medida durante o treino local antes da agregação.",
         )
 
+        if "auc_dx" in hist:
+            task_kpis = st.container(horizontal=True)
+            task_kpis.metric(
+                "AUC — diagnóstico",
+                f"{_f(last.get('auc_dx')):.4f}",
+                delta(last.get("auc_dx"), prev.get("auc_dx")),
+                border=True,
+                help="Área sob a curva ROC da cabeça de diagnóstico (PDAC vs não-PDAC), "
+                "agregada entre os clientes (Figura 4).",
+            )
+            task_kpis.metric(
+                "Acurácia — subtipo molecular",
+                f"{_f(last.get('acc_subtype')):.4f}",
+                delta(last.get("acc_subtype"), prev.get("acc_subtype")),
+                border=True,
+                help="Acurácia da cabeça de subtipagem (classical vs basal-like) "
+                "sobre os pacientes com subtipo conhecido.",
+            )
+
+        if "central_c_index" in hist:
+            central_kpis = st.container(horizontal=True)
+            central_kpis.metric(
+                "C-index — validação central",
+                f"{_f(last.get('central_c_index')):.4f}",
+                delta(last.get("central_c_index"), prev.get("central_c_index")),
+                border=True,
+                help="Modelo global avaliado no servidor sobre uma coorte held-out "
+                "(validação centralizada / independente).",
+            )
+            if "central_auc_dx" in hist:
+                central_kpis.metric(
+                    "AUC diag. — validação central",
+                    f"{_f(last.get('central_auc_dx')):.4f}",
+                    delta(last.get("central_auc_dx"), prev.get("central_auc_dx")),
+                    border=True,
+                )
+
         c1, c2 = st.columns(2)
         with c1, st.container(border=True):
             st.subheader(
-                "C-index global por rodada",
-                help="Evolução da concordância agregada a cada rodada federada. "
-                "A linha pontilhada em 0,5 marca o acaso.",
+                "C-index por rodada",
+                help="Distribuído = média ponderada dos clientes. Central = modelo "
+                "global na coorte do servidor. A linha pontilhada em 0,5 marca o acaso.",
                 divider=False,
             )
-            st.line_chart(hist, x="round", y="c_index", height=280)
+            cidx_cols = [c for c in ("c_index", "central_c_index") if c in hist]
+            st.line_chart(hist, x="round", y=cidx_cols, height=280)
         with c2, st.container(border=True):
             st.subheader(
                 "Perda de Cox por rodada",
@@ -528,6 +615,23 @@ def render_training(run_dir: Path) -> None:
                 )
             else:
                 st.caption("Sem métricas por cliente nesta rodada.")
+
+        gate_hist = hist[hist["modality_gate"].notna()] if "modality_gate" in hist else hist.iloc[0:0]
+        if not gate_hist.empty:
+            with st.container(border=True):
+                st.subheader(
+                    "Contribuição por modalidade (co-atenção)",
+                    help="Peso médio do token [FUSION] sobre cada modalidade na "
+                    "leitura final. Barras equilibradas indicam que a regularização "
+                    "de balanceamento está evitando dominância de uma modalidade.",
+                    divider=False,
+                )
+                rows = []
+                for _, r in gate_hist.iterrows():
+                    for mod, val in (r["modality_gate"] or {}).items():
+                        rows.append({"rodada": r["round"], "modalidade": mod, "peso": val})
+                gdf = pd.DataFrame(rows)
+                st.bar_chart(gdf, x="rodada", y="peso", color="modalidade", height=240)
 
     png_path = run_dir / "c_index.png"
     tb_dir = run_dir / "tb"
@@ -696,3 +800,235 @@ with tab_attention:
                     .properties(height=340)
                 )
                 st.altair_chart(heat, width="stretch")
+
+
+# --------------------------------------------------------------------------- #
+# Aba: explicabilidade (SHAP + Grad-CAM)                                       #
+# --------------------------------------------------------------------------- #
+@st.cache_data(show_spinner=False)
+def _load_model_cfg(model_path: str, mtime: float) -> dict:
+    import torch
+
+    return torch.load(model_path, map_location="cpu", weights_only=False)["model_cfg"]
+
+
+@st.cache_data(show_spinner=False)
+def compute_gradcam(model_path: str, mtime: float, seed: int, dz: int, dy: int, dx: int):
+    import torch
+
+    from models.multimodal_pdac import MultimodalPDACModel
+    from utils.xai import radiomics_gradcam
+
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    model = MultimodalPDACModel(**ckpt["model_cfg"])
+    model.load_state_dict(ckpt["state_dict"], strict=False)
+    model.eval()
+
+    gen = torch.Generator().manual_seed(seed)
+    ct = torch.randn(1, ckpt["model_cfg"].get("ct_in_channels", 1), dz, dy, dx, generator=gen)
+    batch = {"ct_volume": ct, "mutation_status": torch.tensor([[1, 1, 0, 1]])}
+    cam = radiomics_gradcam(model, batch)[0].numpy()
+    return ct[0, 0].numpy(), cam
+
+
+def _load_xai_model(model_path: str):
+    import torch
+
+    from models.multimodal_pdac import MultimodalPDACModel
+
+    ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+    model = MultimodalPDACModel(**ckpt["model_cfg"])
+    model.load_state_dict(ckpt["state_dict"], strict=False)
+    model.eval()
+    return model, ckpt["model_cfg"]
+
+
+@st.cache_data(show_spinner=False)
+def compute_genomic_shap(model_path: str, mtime: float, mutations: tuple[int, ...], nsamples: int):
+    import torch
+
+    from utils.xai import genomics_shap
+
+    model, _ = _load_xai_model(model_path)
+    return genomics_shap(model, torch.tensor([list(mutations)]), nsamples=nsamples)
+
+
+@st.cache_data(show_spinner=False)
+def compute_clinical_shap(
+    model_path: str, mtime: float, num: tuple[float, ...], cat: tuple[int, ...], nsamples: int
+):
+    import torch
+
+    from utils.xai import clinical_shap
+
+    model, _ = _load_xai_model(model_path)
+    return clinical_shap(
+        model, torch.tensor([list(num)]), torch.tensor([list(cat)]), nsamples=nsamples
+    )
+
+
+def _signed_shap_chart(df: "pd.DataFrame"):
+    df = df.copy()
+    df["sentido"] = df["shap"].apply(lambda v: "↑ risco" if v > 0 else "↓ risco")
+    return (
+        alt.Chart(df)
+        .mark_bar()
+        .encode(
+            x=alt.X("shap:Q", title="valor SHAP (log-hazard)"),
+            y=alt.Y("campo:N", sort="-x", title=None),
+            color=alt.Color(
+                "sentido:N",
+                scale=alt.Scale(domain=["↑ risco", "↓ risco"], range=["#C24B4B", "#3B7DD8"]),
+                title=None,
+            ),
+            tooltip=["campo", alt.Tooltip("shap:Q", format="+.4f")],
+        )
+        .properties(height=240)
+    )
+
+
+with tab_xai:
+    model_path = selected_run / "global_model.pt"
+    st.caption(
+        "Grad-CAM 3D no Ramo A e SHAP por gene no Ramo C — cf. Seção 6 do artigo "
+        "(*explicabilidade via SHAP e Grad-CAM*). Com dados sintéticos os mapas não "
+        "têm significado clínico; validam o mecanismo."
+    )
+
+    if not model_path.exists():
+        st.info("O modelo global desta execução ainda não foi salvo.")
+    else:
+        cfg_m = _load_model_cfg(str(model_path), model_path.stat().st_mtime)
+        coattn_ok = cfg_m.get("fusion_mode", "coattention") == "coattention"
+
+        gc_tab, shap_tab, clin_tab = st.tabs(
+            ["Grad-CAM 3D (Ramo A)", "SHAP genômico (Ramo C)", "SHAP clínico (Ramo D)"]
+        )
+
+        with gc_tab:
+            ctrl = st.container(horizontal=True)
+            gseed = int(ctrl.number_input("Seed do volume sintético", value=0, step=1, key="gc_seed"))
+            dim = ctrl.slider("Lado do volume (D=H=W)", 32, 96, 48, step=16, key="gc_dim")
+            if st.button("Gerar Grad-CAM", type="primary", key="gc_btn"):
+                with st.spinner("Retropropagando o risco pelo DenseNet3D…"):
+                    vol, cam = compute_gradcam(
+                        str(model_path), model_path.stat().st_mtime, gseed, dim, dim, dim
+                    )
+                st.session_state["gc_result"] = (vol, cam)
+
+            if "gc_result" in st.session_state:
+                import numpy as np
+
+                vol, cam = st.session_state["gc_result"]
+                z = st.slider("Fatia axial", 0, vol.shape[0] - 1, vol.shape[0] // 2, key="gc_z")
+                m = st.container(horizontal=True)
+                m.metric("Volume", "×".join(map(str, vol.shape)), border=True)
+                m.metric(
+                    "Fração saliente (CAM > 0,5)", f"{float((cam > 0.5).mean()):.1%}", border=True,
+                    help="Proporção de voxels que mais influenciaram o risco predito.",
+                )
+                v = vol[z]
+                v = (v - v.min()) / (float(np.ptp(v)) + 1e-8)
+                rgba = np.zeros((*v.shape, 4))
+                rgba[..., 0] = 1.0
+                rgba[..., 3] = np.clip(cam[z], 0, 1) * 0.6
+                c1, c2 = st.columns(2)
+                with c1, st.container(border=True):
+                    st.markdown("**TC sintética (fatia)**")
+                    st.image(v, clamp=True, width="stretch")
+                with c2, st.container(border=True):
+                    st.markdown("**Grad-CAM sobreposto**")
+                    st.image(np.stack([v] * 3, axis=-1), clamp=True, width="stretch")
+                    st.image(rgba, clamp=True, width="stretch")
+
+        with shap_tab:
+            if not coattn_ok:
+                st.warning("SHAP genômico requer `fusion_mode: coattention` (esta execução usa o modo legado).")
+            else:
+                genes = ["KRAS", "TP53", "SMAD4", "CDKN2A"]
+                st.markdown("**Status mutacional do paciente sintético**")
+                cols = st.columns(4)
+                muts = []
+                for g, col in zip(genes, cols, strict=True):
+                    choice = col.segmented_control(
+                        g, ["wt", "mut"], default="mut" if g in ("KRAS", "TP53") else "wt",
+                        key=f"shap_{g}",
+                    )
+                    muts.append(1 if choice == "mut" else 0)
+                nsamples = st.slider("Amostras do KernelExplainer", 32, 512, 200, step=32, key="shap_ns")
+
+                if st.button("Calcular SHAP", type="primary", key="shap_btn"):
+                    with st.spinner("Estimando valores SHAP…"):
+                        res = compute_genomic_shap(
+                            str(model_path), model_path.stat().st_mtime, tuple(muts), nsamples
+                        )
+                    m = st.container(horizontal=True)
+                    m.metric("Risco base (tudo wt)", f"{res['base_value']:+.3f}", border=True)
+                    m.metric("Risco predito", f"{res['prediction']:+.3f}", border=True)
+                    sdf = pd.DataFrame({"gene": res["genes"], "shap": res["shap"]})
+                    sdf["sentido"] = sdf["shap"].apply(lambda v: "↑ risco" if v > 0 else "↓ risco")
+                    chart = (
+                        alt.Chart(sdf)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("shap:Q", title="valor SHAP (log-hazard)"),
+                            y=alt.Y("gene:N", sort="-x", title=None),
+                            color=alt.Color(
+                                "sentido:N",
+                                scale=alt.Scale(
+                                    domain=["↑ risco", "↓ risco"], range=["#C24B4B", "#3B7DD8"]
+                                ),
+                                title=None,
+                            ),
+                            tooltip=["gene", alt.Tooltip("shap:Q", format="+.4f")],
+                        )
+                        .properties(height=220)
+                    )
+                    with st.container(border=True):
+                        st.subheader(
+                            "Contribuição de cada gene driver",
+                            help="Quanto a mutação de cada gene desloca o log-hazard "
+                            "predito em relação ao paciente todo wild-type. Soma dos "
+                            "SHAP + risco base = risco predito.",
+                            divider=False,
+                        )
+                        st.altair_chart(chart, width="stretch")
+
+        with clin_tab:
+            if not coattn_ok or not cfg_m.get("enable_clinical", True):
+                st.warning("SHAP clínico requer `fusion_mode: coattention` e `enable_clinical: true`.")
+            else:
+                n_cont = int(cfg_m.get("clinical_n_continuous", 5))
+                cards = list(cfg_m.get("clinical_cat_cardinalities", [2, 4, 5, 3]))
+                st.markdown("**Paciente sintético — variáveis clínicas** (contínuas em z-score)")
+                cc = st.columns(min(n_cont, 5))
+                num = [
+                    cc[i % len(cc)].number_input(f"cont_{i}", value=0.0, step=0.5, key=f"cn_{i}")
+                    for i in range(n_cont)
+                ]
+                ck = st.columns(min(len(cards), 5))
+                cat = [
+                    ck[i % len(ck)].number_input(
+                        f"cat_{i} (0..{c - 1})", min_value=0, max_value=c - 1, value=0, key=f"cc_{i}"
+                    )
+                    for i, c in enumerate(cards)
+                ]
+                nsc = st.slider("Amostras do KernelExplainer", 32, 512, 200, step=32, key="cshap_ns")
+                if st.button("Calcular SHAP clínico", type="primary", key="cshap_btn"):
+                    with st.spinner("Estimando valores SHAP…"):
+                        res = compute_clinical_shap(
+                            str(model_path), model_path.stat().st_mtime,
+                            tuple(float(x) for x in num), tuple(int(x) for x in cat), nsc,
+                        )
+                    mm = st.container(horizontal=True)
+                    mm.metric("Risco base", f"{res['base_value']:+.3f}", border=True)
+                    mm.metric("Risco predito", f"{res['prediction']:+.3f}", border=True)
+                    cdf = pd.DataFrame({"campo": res["fields"], "shap": res["shap"]})
+                    with st.container(border=True):
+                        st.subheader(
+                            "Contribuição de cada variável clínica",
+                            help="Deslocamento do log-hazard vs. o paciente de referência "
+                            "(contínuas na média, categóricas na categoria 0).",
+                            divider=False,
+                        )
+                        st.altair_chart(_signed_shap_chart(cdf), width="stretch")

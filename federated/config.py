@@ -13,5 +13,5 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "defa
 def load_config(path: str | Path | None = None) -> dict[str, Any]:
     """Lê o YAML de configuração; usa configs/default.yaml se `path` for None."""
     cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
-    with open(cfg_path, "r", encoding="utf-8") as fh:
+    with open(cfg_path, encoding="utf-8") as fh:
         return yaml.safe_load(fh)

@@ -32,9 +32,11 @@ Saída (forward): dict com
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
-MODALITIES: tuple[str, ...] = ("radiomics", "histology", "genomics")
+# Ordem canônica das modalidades. "clinical" só participa se `enable_clinical=True`
+# no modelo; caso contrário, fica sempre ausente.
+MODALITIES: tuple[str, ...] = ("radiomics", "histology", "genomics", "clinical")
 
 
 class CrossModalAttentionFusion(nn.Module):
