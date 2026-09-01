@@ -1,29 +1,41 @@
 """
 Registro de métricas de uma execução federada -> arquivos em `outputs/<run>/`.
 
-Usado pelo dashboard Streamlit (`streamlit_app.py`) para acompanhar o treino
-"em tela". Escreve, de forma incremental:
+Usado pelo dashboard Streamlit (`streamlit_app.py`) e pelo TensorBoard.
+Escreve, de forma incremental:
 
     outputs/<run>/config.json        -- configuração efetiva da execução
     outputs/<run>/status.json        -- {state, current_round, num_rounds, ...}
     outputs/<run>/history.jsonl      -- uma linha JSON por rodada concluída
-    outputs/<run>/global_model.pt    -- último modelo global agregado (para a aba de atenção)
+    outputs/<run>/global_model.pt    -- último modelo global agregado
+    outputs/<run>/tb/                 -- eventos do TensorBoard (scalars/histogramas)
+    outputs/<run>/c_index.png        -- gráfico C-index x rodada (gerado ao final)
     outputs/<run>/run.log            -- stdout/stderr do processo (escrito pelo lançador)
 
 `RecordingStrategy` embrulha qualquer `flwr` Strategy e intercepta
 `aggregate_fit` / `aggregate_evaluate` para alimentar o `RunRecorder`, sem
 alterar a lógica de agregação (FedAvg/FedProx/FedAdam).
+
+TensorBoard:
+    tensorboard --logdir outputs
+Scalars: global/{c_index,loss_eval,loss_train}, clients/<cliente>/{...},
+attention_branch_b/entropy_norm. Histogramas: weights/<ramo>, attention_branch_b/weights.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
 
 from flwr.common import parameters_to_ndarrays
 from flwr.server.strategy import Strategy
+
+# Bag sintética fixa para acompanhar a evolução da atenção do Ramo B entre rodadas.
+_ATTENTION_PROBE_PATCHES = 128
+_ATTENTION_PROBE_SEED = 0
 
 
 class RunRecorder:
@@ -37,7 +49,10 @@ class RunRecorder:
         self.history_path = self.run_dir / "history.jsonl"
         self.status_path = self.run_dir / "status.json"
         self.model_path = self.run_dir / "global_model.pt"
+        self.png_path = self.run_dir / "c_index.png"
         self._buffer: dict[int, dict[str, Any]] = {}
+        self._client_labels: dict[str, str] = {}
+        self._last_model = None  # nn.Module do último modelo global agregado
         self._t0 = time.time()
 
         (self.run_dir / "config.json").write_text(
@@ -55,6 +70,7 @@ class RunRecorder:
             ),
             encoding="utf-8",
         )
+        self._tb = _TensorBoard(self.run_dir / "tb")
         self.write_status("running", 0)
 
     # -- status ---------------------------------------------------------------
@@ -75,12 +91,15 @@ class RunRecorder:
 
     def finish(self, error: str | None = None) -> None:
         self.write_status("failed" if error else "done", self.num_rounds, error)
+        self._render_png()
+        self._tb.close()
 
-    # -- métricas por rodada ------------------------------------------------------
+    # -- métricas por rodada -------------------------------------------------------
     def record_fit(self, rnd: int, aggregated: dict[str, Any], per_client: list[dict]) -> None:
         entry = self._buffer.setdefault(rnd, {"round": rnd})
         entry["train_loss"] = _get_float(aggregated, "train_loss")
         entry["fit_clients"] = per_client
+        self._register_clients(per_client)
 
     def record_evaluate(
         self, rnd: int, agg_loss: float | None, aggregated: dict[str, Any], per_client: list[dict]
@@ -90,8 +109,12 @@ class RunRecorder:
         entry["c_index"] = _get_float(aggregated, "c_index")
         entry["eval_clients"] = per_client
         entry["wall_time"] = time.time()
+        self._register_clients(per_client)
+
         with self.history_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
+
+        self._log_tensorboard(rnd, entry)
         self._buffer.pop(rnd, None)
         self.write_status("running", rnd)
 
@@ -105,12 +128,143 @@ class RunRecorder:
             ndarrays = parameters_to_ndarrays(parameters)
             model = MultimodalPDACModel(**self.cfg["model"])
             set_parameters(model, ndarrays)
+            model.eval()
             torch.save(
                 {"state_dict": model.state_dict(), "model_cfg": self.cfg["model"]},
                 self.model_path,
             )
+            self._last_model = model
         except Exception:  # noqa: BLE001 -- salvar o modelo é best-effort
+            self._last_model = None
+
+    # -- helpers internos --------------------------------------------------------
+    def _register_clients(self, per_client: list[dict]) -> None:
+        for c in per_client:
+            self._client_labels.setdefault(c["cid"], "")
+        for i, cid in enumerate(sorted(self._client_labels)):
+            self._client_labels[cid] = f"Cliente {i + 1}"
+
+    def _log_tensorboard(self, rnd: int, entry: dict[str, Any]) -> None:
+        if not self._tb.enabled:
+            return
+        self._tb.scalar("global/c_index", entry.get("c_index"), rnd)
+        self._tb.scalar("global/loss_eval", entry.get("eval_loss"), rnd)
+        self._tb.scalar("global/loss_train", entry.get("train_loss"), rnd)
+
+        fit_loss = {c["cid"]: c.get("train_loss") for c in entry.get("fit_clients", [])}
+        for c in entry.get("eval_clients", []):
+            label = self._client_labels.get(c["cid"], c["cid"])
+            self._tb.scalar(f"clients/{label}/c_index", c.get("c_index"), rnd)
+            self._tb.scalar(f"clients/{label}/loss_eval", c.get("loss"), rnd)
+            self._tb.scalar(f"clients/{label}/loss_train", fit_loss.get(c["cid"]), rnd)
+
+        if self._last_model is not None:
+            self._tb.weight_histograms(self._last_model, rnd)
+            entropy = self._tb.attention_histogram(
+                self._last_model, self.cfg["model"].get("patch_feat_dim", 1024), rnd
+            )
+            self._tb.scalar("attention_branch_b/entropy_norm", entropy, rnd)
+
+    def _render_png(self) -> None:
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            rounds, cidx, l_tr, l_ev = [], [], [], []
+            for line in self.history_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                rounds.append(d.get("round"))
+                cidx.append(d.get("c_index"))
+                l_tr.append(d.get("train_loss"))
+                l_ev.append(d.get("eval_loss"))
+            if not rounds:
+                return
+
+            fig, ax1 = plt.subplots(figsize=(7, 4))
+            ax1.plot(rounds, cidx, "o-", color="#3B7DD8", label="C-index global")
+            ax1.axhline(0.5, ls=":", color="gray", lw=1)
+            ax1.set_xticks([r for r in rounds if r is not None])
+            ax1.set_xlabel("rodada federada")
+            ax1.set_ylabel("C-index", color="#3B7DD8")
+            ax1.set_ylim(0, 1)
+            ax1.tick_params(axis="y", labelcolor="#3B7DD8")
+
+            ax2 = ax1.twinx()
+            ax2.plot(rounds, l_tr, "s--", color="#C24B4B", alpha=0.8, label="perda Cox (treino)")
+            ax2.plot(rounds, l_ev, "^--", color="#E08A3C", alpha=0.8, label="perda Cox (avaliação)")
+            ax2.set_ylabel("perda de Cox")
+
+            lines = ax1.get_lines()[:1] + ax2.get_lines()
+            ax1.legend(lines, [ln.get_label() for ln in lines], loc="best", fontsize=8)
+            fig.suptitle(f"{self.run_dir.name} — {self.cfg['federated'].get('strategy', 'FedAvg')}")
+            fig.tight_layout()
+            fig.savefig(self.png_path, dpi=150)
+            plt.close(fig)
+        except Exception:  # noqa: BLE001 -- o PNG é um extra
             pass
+
+
+class _TensorBoard:
+    """Wrapper fino do SummaryWriter -- silenciosamente inerte se indisponível."""
+
+    def __init__(self, log_dir: Path) -> None:
+        self.enabled = False
+        self.writer = None
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+
+            self.writer = SummaryWriter(log_dir=str(log_dir))
+            self.enabled = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    def scalar(self, tag: str, value: Any, step: int) -> None:
+        v = _as_float(value)
+        if self.enabled and v is not None and math.isfinite(v):
+            self.writer.add_scalar(tag, v, step)
+
+    def weight_histograms(self, model, step: int) -> None:
+        try:
+            import torch
+
+            groups: dict[str, list] = {}
+            for name, param in model.named_parameters():
+                groups.setdefault(name.split(".", 1)[0], []).append(param.detach().reshape(-1))
+            for group, tensors in groups.items():
+                flat = torch.cat(tensors)
+                if flat.numel():
+                    self.writer.add_histogram(f"weights/{group}", flat, step)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def attention_histogram(self, model, patch_feat_dim: int, step: int) -> float | None:
+        try:
+            import torch
+
+            gen = torch.Generator().manual_seed(_ATTENTION_PROBE_SEED)
+            bag = torch.randn(1, _ATTENTION_PROBE_PATCHES, patch_feat_dim, generator=gen)
+            mask = torch.ones(1, _ATTENTION_PROBE_PATCHES, dtype=torch.bool)
+            with torch.no_grad():
+                _, attn = model.branch_b(bag, mask)
+            attn = attn.squeeze(0).clamp_min(1e-12)
+            if self.enabled:
+                self.writer.add_histogram("attention_branch_b/weights", attn, step)
+            entropy = float(-(attn * attn.log()).sum())
+            return entropy / math.log(_ATTENTION_PROBE_PATCHES)  # 1.0 = uniforme, ~0 = concentrada
+        except Exception:  # noqa: BLE001
+            return None
+
+    def close(self) -> None:
+        if self.enabled:
+            try:
+                self.writer.flush()
+                self.writer.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class RecordingStrategy(Strategy):

@@ -12,6 +12,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import os
 import traceback
 
 import flwr as fl
@@ -57,6 +58,8 @@ def main() -> None:
     if args.run_dir:
         from federated.reporting import RecordingStrategy, RunRecorder
 
+        # Visível aos atores Ray -> cada cliente cria seu SummaryWriter local.
+        os.environ["PDAC_RUN_DIR"] = str(args.run_dir)
         recorder = RunRecorder(args.run_dir, cfg, args.num_clients, num_rounds)
         strategy = RecordingStrategy(strategy, recorder)
 

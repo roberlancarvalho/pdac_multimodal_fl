@@ -3,9 +3,16 @@ Laços locais de treino/avaliação executados em cada cliente federado.
 
 Mantido separado de `client.py` para que a lógica de otimização seja testável
 isoladamente e reutilizável fora do Flower.
+
+Logging opcional: passe um `SummaryWriter` do TensorBoard em `writer` (+ `step`)
+para registrar as curvas locais (`local/train_loss`, `local/eval_loss`,
+`local/c_index`). O servidor registra as métricas *por rodada* e os histogramas
+de pesos/atenção em `federated/reporting.py`.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
@@ -19,6 +26,9 @@ def train_one_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    *,
+    writer: Any | None = None,
+    step: int | None = None,
 ) -> dict[str, float]:
     """Uma época de treino local com a perda de Cox. Retorna métricas médias."""
     model.train()
@@ -34,7 +44,12 @@ def train_one_epoch(
         optimizer.step()
         total_loss += float(loss.detach())
         n_batches += 1
-    return {"loss": total_loss / max(n_batches, 1)}
+
+    mean_loss = total_loss / max(n_batches, 1)
+    if writer is not None and step is not None:
+        writer.add_scalar("local/train_loss", mean_loss, step)
+        writer.flush()
+    return {"loss": mean_loss}
 
 
 @torch.no_grad()
@@ -42,6 +57,9 @@ def evaluate(
     model: MultimodalPDACModel,
     loader: DataLoader,
     device: torch.device,
+    *,
+    writer: Any | None = None,
+    step: int | None = None,
 ) -> dict[str, float]:
     """Avaliação local: perda de Cox e C-index agregados sobre todo o loader."""
     model.eval()
@@ -61,5 +79,13 @@ def evaluate(
     risk = torch.cat(risks)
     time = torch.cat(times)
     event = torch.cat(events)
-    c_index = concordance_index(risk, time, event)
-    return {"loss": total_loss / max(n_batches, 1), "c_index": float(c_index)}
+    c_index = float(concordance_index(risk, time, event))
+    mean_loss = total_loss / max(n_batches, 1)
+
+    if writer is not None and step is not None:
+        writer.add_scalar("local/eval_loss", mean_loss, step)
+        if c_index == c_index:  # não-NaN
+            writer.add_scalar("local/c_index", c_index, step)
+        writer.flush()
+
+    return {"loss": mean_loss, "c_index": c_index}

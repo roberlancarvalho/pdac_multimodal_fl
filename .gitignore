@@ -17,6 +17,7 @@ env/
 
 # --- Streamlit ---
 .streamlit/secrets.toml
+.tour_seen
 
 # --- Dados de pacientes: NUNCA versionar (LGPD / HIPAA) ---
 data/raw/

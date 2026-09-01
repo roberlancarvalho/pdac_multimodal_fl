@@ -97,12 +97,16 @@ pdac_multimodal_fl/
 ├── federated/
 │   ├── server.py
 │   ├── client.py
-│   ├── engine.py
+│   ├── engine.py             # laços de treino/avaliação (perda de Cox, C-index)
 │   ├── simulation.py
+│   ├── reporting.py          # RecordingStrategy + RunRecorder -> outputs/<run>/
 │   └── config.py
 ├── utils/
 │   ├── common.py             # seed, device, ponte de parâmetros ↔ Flower
 │   └── losses.py             # cox_ph_loss, concordance_index
+├── streamlit_app.py          # painel: dispara e acompanha a simulação "em tela"
+├── .streamlit/config.toml    # tema (claro/escuro/sistema)
+├── outputs/                  # métricas e modelos por execução — NÃO versionado
 ├── requirements.txt
 └── README.md
 ```
@@ -165,6 +169,51 @@ python -m federated.client --cid 1 --num-clients 2
 Para federação entre máquinas, ajuste `federated.server_address` em
 `configs/default.yaml` (ou passe `--server-address host:porta`) e garanta
 conectividade/TLS entre os nós.
+
+### 4.4 Painel (dashboard Streamlit)
+
+```bash
+streamlit run streamlit_app.py     # abre em http://localhost:8501
+```
+
+- **Barra lateral:** configura nº de clientes, rodadas, épocas locais, learning
+  rate, estratégia (FedAvg/FedProx/FedAdam), amostras sintéticas e dropout de
+  modalidade; **Iniciar simulação** dispara `federated/simulation.py` como
+  subprocesso.
+- **Aba "Treino federado":** auto-atualiza a cada 2 s — status/progresso, KPIs
+  (C-index global, perda de Cox treino/avaliação), gráficos por rodada, tabela
+  por cliente (instituição) e log do processo.
+- **Aba "Atenção — histopatologia":** carrega o modelo global agregado e mostra
+  os pesos de atenção do Ramo B (attention-MIL) sobre os patches.
+- **Tour guiado:** abre automaticamente na primeira vez (flag `.tour_seen`) e a
+  qualquer momento pelo botão **❔ Tour do painel** na barra lateral. Os controles
+  e métricas têm *tooltips* (ícone `?`).
+- **Tema claro/escuro:** menu ⋮ (canto superior direito) → *Settings* →
+  *Appearance* → Light / Dark / System (configurável em `.streamlit/config.toml`).
+
+Cada execução grava em `outputs/<run>/`: `config.json`, `status.json`,
+`history.jsonl` (uma linha por rodada), `global_model.pt`, `tb/` (TensorBoard) e
+`c_index.png` (ao final). O seletor **Execução** no topo do painel lista todas as
+execuções para reabrir/comparar. `RecordingStrategy` (`federated/reporting.py`)
+embrulha a estratégia do Flower para registrar as métricas sem alterar a agregação.
+
+### 4.5 TensorBoard
+
+```bash
+tensorboard --logdir outputs        # abre em http://localhost:6006
+```
+
+Registrado por execução em `outputs/<run>/tb/`:
+
+| Tipo | Tags |
+|------|------|
+| Scalars (por rodada) | `global/c_index`, `global/loss_eval`, `global/loss_train`, `clients/<Cliente N>/…` |
+| Scalars (atenção) | `attention_branch_b/entropy_norm` — entropia normalizada da atenção do Ramo B (1.0 = uniforme, ~0 = concentrada) |
+| Histogramas (por rodada) | `weights/branch_a`, `weights/branch_b`, `weights/branch_c`, `weights/fusion`, `attention_branch_b/weights` |
+| Scalars locais (por cliente) | `local/train_loss` (por época), `local/eval_loss`, `local/c_index` — em `tb/local_cliente_<n>/` |
+
+O gráfico **`c_index.png`** (C-index + perdas de Cox × rodada) é gerado ao final
+de cada execução e aparece no painel em *Exportações*.
 
 ---
 

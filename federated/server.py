@@ -43,6 +43,10 @@ def build_strategy(cfg: dict) -> fl.server.strategy.Strategy:
     init_model = MultimodalPDACModel(**cfg["model"])
     initial_parameters = ndarrays_to_parameters(get_parameters(init_model))
 
+    # Informa a rodada atual aos clientes (usado no logging local por passo).
+    def round_config(server_round: int) -> dict:
+        return {"server_round": server_round}
+
     common = dict(
         fraction_fit=fed["fraction_fit"],
         fraction_evaluate=fed["fraction_evaluate"],
@@ -52,6 +56,8 @@ def build_strategy(cfg: dict) -> fl.server.strategy.Strategy:
         initial_parameters=initial_parameters,
         evaluate_metrics_aggregation_fn=weighted_average,
         fit_metrics_aggregation_fn=weighted_average,
+        on_fit_config_fn=round_config,
+        on_evaluate_config_fn=round_config,
     )
 
     name = fed.get("strategy", "FedAvg")

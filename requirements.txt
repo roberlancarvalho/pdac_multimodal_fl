@@ -20,6 +20,8 @@ ray>=2.31            # backend da simulação do Flower (flwr[simulation])
 
 # --- Painel / visualização ---
 streamlit>=1.57
+tensorboard>=2.16    # curvas por rodada, histogramas de pesos e de atenção
+matplotlib>=3.8      # gráfico C-index x rodada (outputs/<run>/c_index.png)
 
 # --- Dados tabulares / genômica / métricas ---
 pandas>=2.1

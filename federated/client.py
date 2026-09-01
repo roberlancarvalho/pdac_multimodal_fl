@@ -19,6 +19,8 @@ Se `data.manifest_csv` estiver vazio no config, usa `SyntheticPDACDataset`
 from __future__ import annotations
 
 import argparse
+import os
+from pathlib import Path
 
 import flwr as fl
 import torch
@@ -61,6 +63,26 @@ def build_dataloaders(cfg: dict, cid: int, num_clients: int):
     return train_loader, val_loader
 
 
+_LOCAL_WRITERS: dict[int, object] = {}  # cache por processo (atores Ray são reutilizados)
+
+
+def _local_writer(cid: int):
+    """SummaryWriter por cliente sob outputs/<run>/tb/ -- só quando PDAC_RUN_DIR existe."""
+    run_dir = os.environ.get("PDAC_RUN_DIR")
+    if not run_dir:
+        return None
+    if cid not in _LOCAL_WRITERS:
+        try:
+            from torch.utils.tensorboard import SummaryWriter
+
+            _LOCAL_WRITERS[cid] = SummaryWriter(
+                log_dir=str(Path(run_dir) / "tb" / f"local_cliente_{cid + 1}")
+            )
+        except Exception:  # noqa: BLE001
+            _LOCAL_WRITERS[cid] = None
+    return _LOCAL_WRITERS[cid]
+
+
 class MultimodalPDACClient(fl.client.NumPyClient):
     """Implementação `NumPyClient` do Flower para o modelo multimodal."""
 
@@ -70,6 +92,7 @@ class MultimodalPDACClient(fl.client.NumPyClient):
         self.device = get_device()
         self.model = MultimodalPDACModel(**cfg["model"]).to(self.device)
         self.train_loader, self.val_loader = build_dataloaders(cfg, cid, num_clients)
+        self.writer = _local_writer(cid)
 
     # -- Flower API -----------------------------------------------------------
     def get_parameters(self, config):
@@ -77,20 +100,29 @@ class MultimodalPDACClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         set_parameters(self.model, parameters)
+        local_epochs = self.cfg["train"]["local_epochs"]
+        rnd = int(config.get("server_round", 1))
         opt = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.cfg["train"]["lr"],
             weight_decay=self.cfg["train"]["weight_decay"],
         )
         metrics = {}
-        for _ in range(self.cfg["train"]["local_epochs"]):
-            metrics = train_one_epoch(self.model, self.train_loader, opt, self.device)
+        for epoch in range(local_epochs):
+            step = (rnd - 1) * local_epochs + epoch + 1
+            metrics = train_one_epoch(
+                self.model, self.train_loader, opt, self.device,
+                writer=self.writer, step=step,
+            )
         n_examples = len(self.train_loader.dataset)
         return get_parameters(self.model), n_examples, {"train_loss": metrics["loss"]}
 
     def evaluate(self, parameters, config):
         set_parameters(self.model, parameters)
-        metrics = evaluate(self.model, self.val_loader, self.device)
+        metrics = evaluate(
+            self.model, self.val_loader, self.device,
+            writer=self.writer, step=int(config.get("server_round", 1)),
+        )
         n_examples = len(self.val_loader.dataset)
         return float(metrics["loss"]), n_examples, {"c_index": metrics["c_index"]}
 

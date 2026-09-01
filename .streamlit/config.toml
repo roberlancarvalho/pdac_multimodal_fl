@@ -1,6 +1,20 @@
+# Sem `base` fixo: o app segue o tema do sistema e o usuário alterna em
+# menu ⋮ (canto superior direito) -> Settings -> Appearance -> Light / Dark / System.
 [theme]
-base = "light"
 primaryColor = "#3B7DD8"
+font = "sans-serif"
+
+[theme.light]
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F6FB"
+textColor = "#1F2328"
+borderColor = "#D7DEE8"
+
+[theme.dark]
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#181B24"
+textColor = "#E6E8EC"
+borderColor = "#2A2F3A"
 
 [browser]
 gatherUsageStats = false

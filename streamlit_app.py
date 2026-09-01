@@ -28,6 +28,7 @@ import streamlit as st
 
 PROJECT_ROOT = Path(__file__).parent
 OUTPUTS = PROJECT_ROOT / "outputs"
+TOUR_FLAG = PROJECT_ROOT / ".tour_seen"  # marca que este ambiente já viu o tour
 
 st.set_page_config(
     page_title="PDAC FL — painel",
@@ -67,6 +68,18 @@ def read_history(run_dir: Path) -> pd.DataFrame:
         except json.JSONDecodeError:
             pass
     return pd.DataFrame(rows)
+
+
+def client_labels(hist: pd.DataFrame) -> dict[str, str]:
+    """Mapeia os `cid` (ids longos do Ray) para rótulos estáveis 'Cliente N'."""
+    cids: set[str] = set()
+    for col in ("eval_clients", "fit_clients"):
+        if col not in hist:
+            continue
+        for entry in hist[col].dropna():
+            for client in entry or []:
+                cids.add(client["cid"])
+    return {cid: f"Cliente {i + 1}" for i, cid in enumerate(sorted(cids))}
 
 
 def proc_alive() -> bool:
@@ -126,29 +139,188 @@ def stop_run() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Tour de introdução                                                          #
+# --------------------------------------------------------------------------- #
+TOUR_STEPS = [
+    {
+        "icon": ":material/hub:",
+        "title": "O que é este painel",
+        "body": (
+            "Ele **dispara e acompanha** treinos do *Pipeline Multimodal Federado "
+            "para PDAC*. Três ramos (TC 3D, histopatologia, genômica) são fundidos "
+            "por atenção cruzada e treinados de forma **federada** com o Flower — "
+            "os dados nunca saem de cada instituição.\n\n"
+            "Nesta demo os dados são sintéticos (`SyntheticPDACDataset`); serve para "
+            "validar o encanamento ponta a ponta."
+        ),
+    },
+    {
+        "icon": ":material/tune:",
+        "title": "1 · Configurar (barra lateral)",
+        "body": (
+            "Na **barra lateral** você define nº de clientes, rodadas federadas, "
+            "épocas locais, *learning rate*, a estratégia de agregação "
+            "(**FedAvg / FedProx / FedAdam**) e o dataset sintético.\n\n"
+            "Para um teste rápido use **2–3 clientes** e **2–3 rodadas** "
+            "(cada rodada leva ~1 min em CPU)."
+        ),
+    },
+    {
+        "icon": ":material/play_arrow:",
+        "title": "2 · Iniciar a simulação",
+        "body": (
+            "**Iniciar simulação** roda `federated/simulation.py` em segundo plano. "
+            "A página passa a se **atualizar sozinha a cada 2 s**.\n\n"
+            "A 1ª rodada demora mais (subida do Ray). Dá para **Parar** a qualquer "
+            "momento."
+        ),
+    },
+    {
+        "icon": ":material/monitoring:",
+        "title": "3 · Acompanhar o treino",
+        "body": (
+            "Na aba **Treino federado**:\n"
+            "- **C-index global** — capacidade de ordenar risco/sobrevida "
+            "(0,5 = acaso, 1,0 = perfeito);\n"
+            "- **perda de Cox** (treino e avaliação) — deve cair;\n"
+            "- gráficos por rodada e **tabela por cliente** (cada instituição)."
+        ),
+    },
+    {
+        "icon": ":material/visibility:",
+        "title": "4 · Atenção da histopatologia",
+        "body": (
+            "A aba **Atenção — histopatologia** carrega o modelo global agregado e "
+            "mostra **quais patches da lâmina** o Ramo B (attention-MIL) considerou "
+            "mais informativos. Com patches sintéticos a atenção fica ~uniforme — é "
+            "a demonstração do mecanismo de interpretabilidade."
+        ),
+    },
+    {
+        "icon": ":material/download:",
+        "title": "5 · Exportações e execuções",
+        "body": (
+            "Cada execução grava em `outputs/<run>/`. No topo, o seletor "
+            "**Execução** reabre/compara runs anteriores.\n\n"
+            "Em *Exportações* há o PNG **C-index × rodada** e o comando do "
+            "**TensorBoard** (`tensorboard --logdir outputs`) com curvas, "
+            "histogramas de pesos e de atenção.\n\n"
+            "Reabra este tour quando quiser em **❔ Tour do painel** na barra lateral."
+        ),
+    },
+]
+
+
+def _close_tour() -> None:
+    st.session_state.tour_open = False
+    st.session_state.tour_step = 0
+
+
+@st.dialog("Tour do painel", width="large", on_dismiss=_close_tour)
+def _tour_dialog() -> None:
+    step = st.session_state.get("tour_step", 0)
+    total = len(TOUR_STEPS)
+    s = TOUR_STEPS[step]
+
+    st.progress((step + 1) / total, text=f"Passo {step + 1} de {total}")
+    st.subheader(f"{s['icon']} {s['title']}")
+    st.markdown(s["body"])
+    st.divider()
+
+    prev_col, skip_col, next_col = st.columns(3)
+    if prev_col.button(
+        "Anterior", icon=":material/arrow_back:", width="stretch", disabled=step == 0
+    ):
+        st.session_state.tour_step = max(0, step - 1)
+        st.rerun()
+    if skip_col.button("Pular", width="stretch"):
+        _close_tour()
+        st.rerun()
+    if step < total - 1:
+        if next_col.button(
+            "Próximo", icon=":material/arrow_forward:", type="primary", width="stretch"
+        ):
+            st.session_state.tour_step = step + 1
+            st.rerun()
+    elif next_col.button("Concluir", icon=":material/check:", type="primary", width="stretch"):
+        _close_tour()
+        st.rerun()
+
+
+def maybe_start_tour() -> None:
+    """Abre o tour automaticamente na primeira vez; senão, respeita o botão."""
+    if "tour_open" not in st.session_state:
+        st.session_state.tour_step = 0
+        first_time = not TOUR_FLAG.exists()
+        st.session_state.tour_open = first_time
+        if first_time:
+            try:
+                TOUR_FLAG.write_text("seen\n", encoding="utf-8")
+            except OSError:
+                pass
+    if st.session_state.get("tour_open"):
+        _tour_dialog()
+
+
+# --------------------------------------------------------------------------- #
 # Barra lateral — configuração e disparo                                      #
 # --------------------------------------------------------------------------- #
 with st.sidebar:
+    if st.button(
+        "Tour do painel",
+        icon=":material/help:",
+        width="stretch",
+        help="Reabre a introdução passo a passo do painel.",
+    ):
+        st.session_state.tour_open = True
+        st.session_state.tour_step = 0
+        st.rerun()
+
     st.subheader("Configuração da simulação")
 
     with st.form("config"):
-        num_clients = st.slider("Clientes (instituições)", 2, 6, 2)
-        num_rounds = st.slider("Rodadas federadas", 1, 20, 3)
-        local_epochs = st.slider("Épocas locais por rodada", 1, 5, 1)
+        num_clients = st.slider(
+            "Clientes (instituições)", 2, 6, 2,
+            help="Quantos nós federados virtuais participam. Cada um treina só nos "
+            "seus dados; o servidor agrega os pesos.",
+        )
+        num_rounds = st.slider(
+            "Rodadas federadas", 1, 20, 3,
+            help="Ciclos de treino-local → agregação. Cada rodada leva ~1 min em CPU.",
+        )
+        local_epochs = st.slider(
+            "Épocas locais por rodada", 1, 5, 1,
+            help="Passagens completas pelos dados locais de cada cliente antes de "
+            "enviar os pesos ao servidor.",
+        )
         lr = st.select_slider(
             "Learning rate",
             options=[1e-4, 3e-4, 1e-3, 3e-3],
             value=3e-4,
             format_func=lambda v: f"{v:.0e}",
+            help="Taxa de aprendizado do otimizador AdamW nos clientes.",
         )
         strategy = st.segmented_control(
             "Estratégia de agregação",
             ["FedAvg", "FedProx", "FedAdam"],
             default="FedAvg",
+            help="Como o servidor combina os pesos dos clientes. FedProx penaliza "
+            "desvio do modelo global (bom p/ dados não-IID); FedAdam usa momento no "
+            "servidor.",
         )
-        synthetic_samples = st.slider("Amostras sintéticas (pool)", 16, 256, 64, step=16)
-        modality_dropout = st.slider("Dropout de modalidade", 0.0, 0.5, 0.1, step=0.05)
-        seed = int(st.number_input("Seed", value=42, step=1))
+        synthetic_samples = st.slider(
+            "Amostras sintéticas (pool)", 16, 256, 64, step=16,
+            help="Tamanho do dataset sintético repartido entre os clientes "
+            "(80% treino / 20% validação por cliente).",
+        )
+        modality_dropout = st.slider(
+            "Dropout de modalidade", 0.0, 0.5, 0.1, step=0.05,
+            help="Fração de modalidades ausentes por paciente — simula coortes "
+            "incompletas. A fusão lida com modalidade faltante via máscara.",
+        )
+        seed = int(st.number_input(
+            "Seed", value=42, step=1, help="Semente de aleatoriedade (reprodutibilidade)."
+        ))
         submitted = st.form_submit_button(
             "Iniciar simulação", type="primary", width="stretch", disabled=proc_alive()
         )
@@ -184,7 +356,13 @@ if submitted:
 # --------------------------------------------------------------------------- #
 # Área principal                                                              #
 # --------------------------------------------------------------------------- #
+maybe_start_tour()
+
 st.title("Pipeline Multimodal Federado — PDAC")
+st.caption(
+    "Dispare e acompanhe o treino federado. Novo por aqui? Veja o "
+    "**❔ Tour do painel** na barra lateral."
+)
 
 runs = list_runs()
 if not runs:
@@ -205,6 +383,8 @@ selected_run = Path(
         run_keys,
         index=default_idx,
         format_func=lambda k: Path(k).name,
+        help="Cada run vive em outputs/<run>/. Selecione para reabrir ou comparar "
+        "execuções anteriores.",
     )
 )
 
@@ -270,6 +450,9 @@ def render_training(run_dir: Path) -> None:
             border=True,
             chart_data=spark or None,
             chart_type="line",
+            help="Concordância de Harrell agregada entre os clientes: probabilidade "
+            "de o paciente com maior risco predito ter o evento antes. "
+            "0,5 = acaso · 1,0 = ordenação perfeita.",
         )
         kpis.metric(
             "Perda de Cox (avaliação)",
@@ -277,6 +460,8 @@ def render_training(run_dir: Path) -> None:
             delta(last.get("eval_loss"), prev.get("eval_loss")),
             delta_color="inverse",
             border=True,
+            help="Negative partial log-likelihood de Cox no conjunto de validação "
+            "de cada cliente, agregada. Menor é melhor.",
         )
         kpis.metric(
             "Perda de Cox (treino)",
@@ -284,33 +469,81 @@ def render_training(run_dir: Path) -> None:
             delta(last.get("train_loss"), prev.get("train_loss")),
             delta_color="inverse",
             border=True,
+            help="Mesma perda, medida durante o treino local antes da agregação.",
         )
 
         c1, c2 = st.columns(2)
         with c1, st.container(border=True):
-            st.markdown("**C-index global por rodada**")
+            st.subheader(
+                "C-index global por rodada",
+                help="Evolução da concordância agregada a cada rodada federada. "
+                "A linha pontilhada em 0,5 marca o acaso.",
+                divider=False,
+            )
             st.line_chart(hist, x="round", y="c_index", height=280)
         with c2, st.container(border=True):
-            st.markdown("**Perda de Cox por rodada**")
+            st.subheader(
+                "Perda de Cox por rodada",
+                help="Treino vs. avaliação. Divergência entre as duas curvas "
+                "sugere overfitting local.",
+                divider=False,
+            )
             loss_cols = [c for c in ("train_loss", "eval_loss") if c in hist]
             st.line_chart(hist, x="round", y=loss_cols, height=280)
 
         with st.container(border=True):
-            st.markdown("**Métricas por cliente — última rodada**")
+            st.subheader(
+                "Métricas por cliente (instituição) — última rodada",
+                help="Como cada nó federado se saiu. Heterogeneidade grande entre "
+                "clientes indica dados não-IID — considere FedProx.",
+                divider=False,
+            )
             per_client = last.get("eval_clients") or []
             if per_client:
-                df = pd.DataFrame(per_client)
-                df = df.rename(
-                    columns={
-                        "cid": "cliente",
-                        "num_examples": "amostras (val)",
-                        "loss": "perda Cox",
-                        "c_index": "C-index",
-                    }
+                labels = client_labels(hist)
+                fit_loss = {
+                    c["cid"]: c.get("train_loss") for c in (last.get("fit_clients") or [])
+                }
+                df = pd.DataFrame(
+                    [
+                        {
+                            "cliente": labels.get(c["cid"], c["cid"]),
+                            "amostras (val)": c.get("num_examples"),
+                            "perda Cox (treino)": fit_loss.get(c["cid"]),
+                            "perda Cox (val)": c.get("loss"),
+                            "C-index": c.get("c_index"),
+                        }
+                        for c in per_client
+                    ]
                 ).sort_values("cliente")
-                st.dataframe(df, hide_index=True, width="stretch")
+                st.dataframe(
+                    df,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "perda Cox (treino)": st.column_config.NumberColumn(format="%.4f"),
+                        "perda Cox (val)": st.column_config.NumberColumn(format="%.4f"),
+                        "C-index": st.column_config.NumberColumn(format="%.4f"),
+                    },
+                )
             else:
                 st.caption("Sem métricas por cliente nesta rodada.")
+
+    png_path = run_dir / "c_index.png"
+    tb_dir = run_dir / "tb"
+    if png_path.exists() or tb_dir.exists():
+        with st.expander(
+            "Exportações (PNG · TensorBoard)",
+            icon=":material/download:",
+        ):
+            if png_path.exists():
+                st.image(str(png_path), caption="Gerado ao final da execução.")
+            if tb_dir.exists():
+                st.markdown(
+                    "**TensorBoard** — curvas por rodada, histogramas de pesos "
+                    "(`weights/<ramo>`) e de atenção do Ramo B:"
+                )
+                st.code("tensorboard --logdir outputs", language="bash")
 
     with st.expander("Log da execução"):
         log_path = run_dir / "run.log"
@@ -376,11 +609,25 @@ with tab_attention:
         st.info("O modelo global desta execução ainda não foi salvo (aguarde a 1ª rodada).")
     else:
         ctrl = st.container(horizontal=True)
-        n_patches = ctrl.slider("Patches na *bag*", 32, 512, 200, step=32)
-        patient_seed = int(ctrl.number_input("Seed do paciente sintético", value=0, step=1))
-        top_k = ctrl.slider("Top-k patches", 5, 50, 15)
+        n_patches = ctrl.slider(
+            "Patches na *bag*", 32, 512, 200, step=32,
+            help="Quantos patches de WSI compõem a lâmina do paciente sintético.",
+        )
+        patient_seed = int(ctrl.number_input(
+            "Seed do paciente sintético", value=0, step=1,
+            help="Muda o paciente sintético gerado (embeddings de patches aleatórios).",
+        ))
+        top_k = ctrl.slider(
+            "Top-k patches", 5, 50, 15,
+            help="Quantos patches de maior atenção listar na tabela.",
+        )
 
-        if st.button("Gerar visualização de atenção", type="primary"):
+        if st.button(
+            "Gerar visualização de atenção",
+            type="primary",
+            help="Roda o Ramo B (attention-MIL) do modelo global sobre a lâmina "
+            "sintética e mostra o peso de atenção de cada patch.",
+        ):
             with st.spinner("Rodando o Ramo B…"):
                 attn = compute_attention(
                     str(model_path), model_path.stat().st_mtime, n_patches, patient_seed
@@ -389,20 +636,39 @@ with tab_attention:
             df_attn = pd.DataFrame({"patch": range(len(attn)), "atencao": attn})
 
             m = st.container(horizontal=True)
-            m.metric("Patches", len(attn), border=True)
-            m.metric("Atenção máx.", f"{attn.max():.4f}", border=True)
-            m.metric("Concentração (máx/média)", f"{attn.max() / attn.mean():.2f}×", border=True)
+            m.metric(
+                "Patches", len(attn), border=True,
+                help="Tamanho da bag processada.",
+            )
+            m.metric(
+                "Atenção máx.", f"{attn.max():.4f}", border=True,
+                help="Maior peso atribuído a um único patch (os pesos somam 1).",
+            )
+            m.metric(
+                "Concentração (máx/média)", f"{attn.max() / attn.mean():.2f}×", border=True,
+                help="1× = atenção uniforme; quanto maior, mais o modelo se apoia "
+                "em poucos patches.",
+            )
 
             c1, c2 = st.columns([2, 3])
             with c1, st.container(border=True):
-                st.markdown(f"**Top-{top_k} patches por atenção**")
+                st.subheader(
+                    f"Top-{top_k} patches por atenção",
+                    help="Os patches que mais pesaram no embedding da lâmina.",
+                    divider=False,
+                )
                 st.dataframe(
                     df_attn.nlargest(top_k, "atencao").reset_index(drop=True),
                     hide_index=True,
                     width="stretch",
                 )
             with c2, st.container(border=True):
-                st.markdown("**Mapa de atenção (grade pseudo-espacial)**")
+                st.subheader(
+                    "Mapa de atenção (grade pseudo-espacial)",
+                    help="Os patches são dispostos numa grade só para visualização — "
+                    "não corresponde à posição real na lâmina.",
+                    divider=False,
+                )
                 side = math.ceil(math.sqrt(len(attn)))
                 padded = list(attn) + [None] * (side * side - len(attn))
                 grid = pd.DataFrame(
