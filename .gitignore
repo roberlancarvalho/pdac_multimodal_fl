@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Ambientes ---
+venv/
+.venv/
+env/
+
+# --- IDE ---
+.idea/
+.vscode/
+
+# --- Dados de pacientes: NUNCA versionar (LGPD / HIPAA) ---
+data/raw/
+data/processed/
+data/interim/
+*.nii
+*.nii.gz
+*.svs
+*.ndpi
+*.tiff
+*.pt
+*.npy
+*.npz
+manifests/*.csv
+
+# --- Artefatos de treino ---
+outputs/
+checkpoints/
+runs/
+wandb/
+mlruns/
+*.log

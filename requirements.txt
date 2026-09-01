@@ -1,0 +1,32 @@
+# Pipeline Multimodal Federado para PDAC -- dependências
+# Python >= 3.10 (desenvolvido em 3.13). Instale o PyTorch com a build de CUDA
+# adequada à sua máquina: https://pytorch.org/get-started/locally/
+
+# --- Núcleo: deep learning ---
+torch>=2.2
+torchvision>=0.17
+
+# --- Ramo A: imagens médicas 3D ---
+monai>=1.3
+nibabel>=5.2          # leitura de NIfTI
+SimpleITK>=2.3        # resample / pré-processamento de TC
+
+# --- Fusão / atenção ---
+einops>=0.7
+
+# --- Aprendizado Federado ---
+flwr[simulation]>=1.7
+
+# --- Dados tabulares / genômica / métricas ---
+pandas>=2.1
+numpy>=1.26
+scikit-learn>=1.4
+lifelines>=0.28       # análise de sobrevida (C-index, Kaplan-Meier) para validação
+
+# --- Config / utilidades ---
+pyyaml>=6.0
+tqdm>=4.66
+
+# --- Qualidade de código / testes (dev) ---
+pytest>=8.0
+ruff>=0.4

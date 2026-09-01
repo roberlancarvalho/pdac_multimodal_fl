@@ -1,0 +1,41 @@
+# Configuração de referência do Pipeline Multimodal Federado para PDAC.
+# Carregada por federated/server.py e federated/client.py (via --config).
+
+model:
+  embed_dim: 256
+  patch_feat_dim: 1024        # dimensão do embedding de patch do foundation model (UNI=1024)
+  ct_in_channels: 1
+  n_genes: 4
+  n_gene_states: 3            # 0=wt, 1=mut, 2=desconhecido
+  fusion_layers: 2
+  fusion_heads: 8
+  dropout: 0.2
+  n_outputs: 1               # 1 = risco (Cox PH)
+  freeze_radiomics: false
+  freeze_histology: false
+  freeze_genomics: false
+
+train:
+  local_epochs: 1
+  batch_size: 4
+  lr: 0.0003
+  weight_decay: 0.0001
+  seed: 42
+
+federated:
+  server_address: "0.0.0.0:8080"
+  num_rounds: 10
+  fraction_fit: 1.0
+  fraction_evaluate: 1.0
+  min_fit_clients: 2
+  min_evaluate_clients: 2
+  min_available_clients: 2
+  strategy: "FedAvg"          # FedAvg | FedProx | FedAdam
+
+data:
+  # Cada cliente aponta para o seu próprio manifesto; deixe em branco para usar
+  # o SyntheticPDACDataset (smoke test).
+  manifest_csv: ""
+  data_root: "./data/processed"
+  synthetic_samples: 64
+  modality_dropout: 0.1       # fração de modalidades ausentes no dataset sintético
