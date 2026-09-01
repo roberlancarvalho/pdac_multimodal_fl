@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: "Se você usar este software, por favor cite-o conforme abaixo."
+title: "Pipeline Multimodal Federado para PDAC"
+abstract: >-
+  Implementação de referência de um pipeline multimodal federado para diagnóstico,
+  subtipagem molecular e prognóstico de sobrevida do adenocarcinoma ductal de
+  pâncreas (PDAC). Combina três ramos independentes — radiômico 3D (TC, MONAI),
+  histopatológico (embeddings de patches de WSI por foundation model) e genômico
+  tabular (KRAS/TP53/SMAD4/CDKN2A) — mais um ramo clínico opcional, fundidos por
+  co-atenção cross-modal par-a-par (MCAT). Treinamento federado com Flower
+  (FedAvg/FedProx/FedAdam), DP-FedAvg, FedBN e avaliação centralizada;
+  explicabilidade via Grad-CAM 3D e SHAP; painel Streamlit e logging TensorBoard.
+type: software
+authors:
+  - family-names: "Carvalho"
+    given-names: "Roberlan Oliveira de"
+    affiliation: "Programa de Pós-Graduação em Informática (PPGI), Universidade Federal do Rio de Janeiro (UFRJ)"
+    orcid: "https://orcid.org/0009-0008-7724-3381"   # <-- preencha o seu ORCID
+  - family-names: "Lima"
+    given-names: "Josefino Cabral Melo"
+    affiliation: "Programa de Pós-Graduação em Informática (PPGI), Universidade Federal do Rio de Janeiro (UFRJ)"
+    orcid: "https://orcid.org/0000-0003-1754-1666"
+repository-code: "https://github.com/roberlancarvalho/pdac_multimodal_fl"
+license: MIT
+version: "0.1.0"
+date-released: "2026-09-01"
+keywords:
+  - "pancreatic cancer"
+  - "PDAC"
+  - "federated learning"
+  - "multimodal deep learning"
+  - "radiomics"
+  - "computational pathology"
+  - "genomics"
+  - "survival analysis"
+  - "cross-modal attention"
+  - "explainable AI"
+# Quando a revisão sistemática for publicada, preencha o DOI e descomente:
+# references:
+#   - type: article
+#     title: "Modelos de Machine Learning e Deep Learning para Diagnóstico Precoce e Prognóstico do Câncer de Pâncreas: Uma Revisão Sistemática"
+#     authors:
+#       - family-names: "Carvalho"
+#         given-names: "Roberlan Oliveira de"
+#       - family-names: "Lima"
+#         given-names: "Josefino Cabral Melo"
+#     doi: "10.xxxx/xxxxx"
+#     year: 2026

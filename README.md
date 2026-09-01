@@ -1,5 +1,9 @@
 # Pipeline Multimodal Federado para PDAC
 
+<!-- Após publicar no Zenodo, cole aqui o badge do DOI (concept DOI):
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+-->
+
 Implementação prática (mestrado — PPGI/UFRJ) de um modelo **multimodal** para
 predição de **risco / sobrevida** em **adenocarcinoma ductal de pâncreas (PDAC)**,
 treinado de forma **federada** (os dados de cada instituição nunca saem da

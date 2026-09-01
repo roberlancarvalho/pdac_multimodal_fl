@@ -1,0 +1,30 @@
+{
+  "title": "Pipeline Multimodal Federado para PDAC",
+  "description": "<p>Implementação de referência de um pipeline multimodal federado para diagnóstico, subtipagem molecular e prognóstico de sobrevida do adenocarcinoma ductal de pâncreas (PDAC). Três ramos independentes (radiômico 3D via MONAI, histopatológico via embeddings de patches de WSI, genômico tabular) mais um ramo clínico opcional, fundidos por co-atenção cross-modal par-a-par (MCAT). Treinamento federado com Flower (FedAvg/FedProx/FedAdam), DP-FedAvg, FedBN e avaliação centralizada; explicabilidade via Grad-CAM 3D e SHAP; painel Streamlit e logging TensorBoard.</p>",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Carvalho, Roberlan Oliveira de",
+      "affiliation": "PPGI, Universidade Federal do Rio de Janeiro (UFRJ)"
+    },
+    {
+      "name": "Lima, Josefino Cabral Melo",
+      "affiliation": "PPGI, Universidade Federal do Rio de Janeiro (UFRJ)"
+    }
+  ],
+  "keywords": [
+    "pancreatic cancer",
+    "PDAC",
+    "federated learning",
+    "multimodal deep learning",
+    "radiomics",
+    "computational pathology",
+    "genomics",
+    "survival analysis",
+    "cross-modal attention",
+    "explainable AI"
+  ],
+  "language": "por"
+}
