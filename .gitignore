@@ -15,6 +15,9 @@ env/
 .idea/
 .vscode/
 
+# --- Streamlit ---
+.streamlit/secrets.toml
+
 # --- Dados de pacientes: NUNCA versionar (LGPD / HIPAA) ---
 data/raw/
 data/processed/

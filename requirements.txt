@@ -16,6 +16,10 @@ einops>=0.7
 
 # --- Aprendizado Federado ---
 flwr[simulation]>=1.7
+ray>=2.31            # backend da simulação do Flower (flwr[simulation])
+
+# --- Painel / visualização ---
+streamlit>=1.57
 
 # --- Dados tabulares / genômica / métricas ---
 pandas>=2.1
