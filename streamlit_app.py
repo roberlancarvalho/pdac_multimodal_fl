@@ -585,7 +585,8 @@ def compute_attention(model_path: str, mtime: float, n_patches: int, seed: int):
 
     ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
     model = MultimodalPDACModel(**ckpt["model_cfg"])
-    model.load_state_dict(ckpt["state_dict"])
+    # strict=False: execuções antigas (antes da co-atenção) têm state_dict de arquitetura diferente.
+    model.load_state_dict(ckpt["state_dict"], strict=False)
     model.eval()
 
     gen = torch.Generator().manual_seed(seed)

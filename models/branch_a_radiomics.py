@@ -12,9 +12,13 @@ para a dimensão de embedding compartilhada pelos três ramos, de modo que o
 mecanismo de fusão (Cross-Modal Attention) receba tokens de mesma dimensão.
 
 Entrada  (forward): Tensor float32 de shape (B, in_channels, D, H, W)
-                    -- volume 3D de TC. `in_channels` costuma ser 1.
-Saída    (forward): Tensor float32 de shape (B, embed_dim)
-                    -- embedding radiômico por paciente.
+                    -- volume 3D de TC. `in_channels` = 1 (single-phase) ou 2
+                    (fases arterial pancreática + venosa portal, encoder compartilhado).
+Saída    (forward):
+    - `return_tokens=False` (padrão): Tensor (B, embed_dim) -- embedding por paciente.
+    - `return_tokens=True`: Tensor (B, T, embed_dim) -- sequência de tokens
+      espaciais latentes (T = produto de `token_grid`), preservando a localização
+      da lesão para a co-atenção cruzada com a histologia (ver `fusion_coattention.py`).
 """
 
 from __future__ import annotations
@@ -50,9 +54,11 @@ class RadiomicsBranch3D(nn.Module):
         backbone_dropout: float = 0.2,
         pretrained: bool = False,
         freeze_backbone: bool = False,
+        token_grid: tuple[int, int, int] = (2, 2, 2),
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
+        self.token_grid = tuple(token_grid)
 
         # DenseNet121 3D da MONAI. Usamos `out_channels` como dimensão intermediária
         # e substituímos a última camada por uma projeção para `embed_dim`.
@@ -69,6 +75,7 @@ class RadiomicsBranch3D(nn.Module):
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
+        # Cabeça para o vetor único por paciente (fusão legada / uso isolado).
         self.head = nn.Sequential(
             nn.LayerNorm(backbone_features),
             nn.Linear(backbone_features, embed_dim),
@@ -76,23 +83,36 @@ class RadiomicsBranch3D(nn.Module):
             nn.Dropout(backbone_dropout),
             nn.Linear(embed_dim, embed_dim),
         )
+        # Cabeça para os tokens espaciais (co-atenção cruzada).
+        self.token_pool = nn.AdaptiveAvgPool3d(self.token_grid)
+        self.token_head = nn.Sequential(
+            nn.LayerNorm(backbone_features),
+            nn.Linear(backbone_features, embed_dim),
+            nn.GELU(),
+            nn.Dropout(backbone_dropout),
+        )
 
-    def forward(self, ct_volume: torch.Tensor) -> torch.Tensor:
-        """Extrai o embedding radiômico de um lote de volumes 3D.
+    def forward(self, ct_volume: torch.Tensor, return_tokens: bool = False) -> torch.Tensor:
+        """Extrai a representação radiômica de um lote de volumes 3D.
 
         Args:
             ct_volume: Tensor (B, in_channels, D, H, W).
+            return_tokens: Se True, devolve a sequência de tokens espaciais.
 
         Returns:
-            Tensor (B, embed_dim) com o embedding radiômico.
+            (B, embed_dim) se `return_tokens=False`; (B, T, embed_dim) caso contrário.
         """
-        features = self.backbone(ct_volume)  # (B, backbone_features)
-        embedding = self.head(features)      # (B, embed_dim)
-        return embedding
+        if not return_tokens:
+            return self.head(self.backbone(ct_volume))  # (B, embed_dim)
+
+        fmap = torch.relu(self.backbone.features(ct_volume))  # (B, C, d, h, w)
+        grid = self.token_pool(fmap)                          # (B, C, gz, gy, gx)
+        seq = grid.flatten(2).transpose(1, 2)                 # (B, T, C)
+        return self.token_head(seq)                           # (B, T, embed_dim)
 
 
 if __name__ == "__main__":
     model = RadiomicsBranch3D(in_channels=1, embed_dim=256)
     dummy = torch.randn(2, 1, 64, 96, 96)
-    out = model(dummy)
-    print("Ramo A -- saída:", out.shape)  # esperado: torch.Size([2, 256])
+    print("Ramo A -- vetor:", model(dummy).shape)                 # (2, 256)
+    print("Ramo A -- tokens:", model(dummy, return_tokens=True).shape)  # (2, 8, 256)

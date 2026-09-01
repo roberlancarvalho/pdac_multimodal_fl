@@ -4,13 +4,19 @@
 model:
   embed_dim: 256
   patch_feat_dim: 1024        # dimensão do embedding de patch do foundation model (UNI=1024)
-  ct_in_channels: 1
+  ct_in_channels: 1           # 1 = single-phase; 2 = fases AP + VP (encoder compartilhado)
   n_genes: 4
   n_gene_states: 3            # 0=wt, 1=mut, 2=desconhecido
   fusion_layers: 2
   fusion_heads: 8
   dropout: 0.2
   n_outputs: 1               # 1 = risco (Cox PH)
+  # Fusão -- "coattention": co-atenção cross-modal par-a-par (MCAT, Seção 6.1);
+  #          "transformer": auto-atenção conjunta sobre 1 token/modalidade (legado).
+  fusion_mode: coattention
+  radiomics_token_grid: [2, 2, 2]   # tokens espaciais do Ramo A (8) p/ a co-atenção
+  histology_tokens: 8               # tokens histológicos do Ramo B p/ a co-atenção
+  fusion_genomics_query_only: false # true = genômica só como Query (não vira K/V)
   freeze_radiomics: false
   freeze_histology: false
   freeze_genomics: false

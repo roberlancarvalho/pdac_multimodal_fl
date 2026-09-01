@@ -78,9 +78,11 @@ class HistologyBranch(nn.Module):
         n_transformer_layers: int = 2,
         n_heads: int = 8,
         dropout: float = 0.25,
+        n_output_tokens: int = 8,
     ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
+        self.n_output_tokens = n_output_tokens
 
         self.input_proj = nn.Sequential(
             nn.Linear(input_feat_dim, hidden_dim),
@@ -114,43 +116,70 @@ class HistologyBranch(nn.Module):
             nn.Linear(embed_dim, embed_dim),
         )
 
+        # Pooling multi-token: `n_output_tokens` slots aprendíveis atendem aos
+        # patches -> tokens histológicos para a co-atenção cruzada (Seção 6.1).
+        if n_output_tokens > 1:
+            self.slot_queries = nn.Parameter(torch.zeros(n_output_tokens, hidden_dim))
+            nn.init.trunc_normal_(self.slot_queries, std=0.02)
+            self.slot_attn = nn.MultiheadAttention(
+                hidden_dim, n_heads, dropout=dropout, batch_first=True
+            )
+            self.token_head = nn.Sequential(
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, embed_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            )
+
     def forward(
         self,
         patch_embeddings: torch.Tensor,
         mask: torch.Tensor | None = None,
+        return_tokens: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Agrega embeddings de patches em um embedding de lâmina.
+        """Agrega embeddings de patches em representação de lâmina.
 
         Args:
             patch_embeddings: Tensor (B, N, input_feat_dim).
             mask: Tensor bool (B, N) com True para patches válidos (opcional).
+            return_tokens: Se True e `n_output_tokens > 1`, devolve
+                (B, n_output_tokens, embed_dim); senão, (B, embed_dim).
 
         Returns:
-            slide_embedding: Tensor (B, embed_dim).
-            attention: Tensor (B, N) com os pesos de atenção por patch.
+            (repr, attention) -- `attention` (B, N) são os pesos por patch
+            (do pooling gated, ou média dos slots quando `return_tokens`).
         """
         x = self.input_proj(patch_embeddings)  # (B, N, hidden_dim)
 
         empty_bag = None
+        safe_kpm = None
         if mask is not None:
             empty_bag = ~mask.any(dim=1)  # (B,) amostras sem nenhum patch válido
+            safe_mask = mask.clone()
+            safe_mask[empty_bag] = True  # evita softmax de tudo -inf (NaN)
+            safe_kpm = ~safe_mask
 
         if self.transformer is not None:
-            key_padding_mask = None
-            if mask is not None:
-                # Uma linha totalmente `True` (bag vazia) geraria NaN no softmax da
-                # atenção -> deixamos essa linha "toda válida" e zeramos a saída depois.
-                safe_mask = mask.clone()
-                safe_mask[empty_bag] = True
-                key_padding_mask = ~safe_mask
-            x = self.transformer(x, src_key_padding_mask=key_padding_mask)
+            x = self.transformer(x, src_key_padding_mask=safe_kpm)
+
+        if return_tokens and self.n_output_tokens > 1:
+            b = x.size(0)
+            q = self.slot_queries.unsqueeze(0).expand(b, -1, -1)  # (B, K, hidden)
+            slots, attn_w = self.slot_attn(
+                q, x, x, key_padding_mask=safe_kpm,
+                need_weights=True, average_attn_weights=True,
+            )
+            tokens = self.token_head(slots)  # (B, K, embed_dim)
+            attention = attn_w.mean(dim=1)   # (B, N) média sobre os slots
+            if empty_bag is not None and empty_bag.any():
+                tokens = tokens.masked_fill(empty_bag.view(b, 1, 1), 0.0)
+                attention = attention.masked_fill(empty_bag.unsqueeze(-1), 0.0)
+            return tokens, attention
 
         pooled, attention = self.attn_pool(x, mask=mask)  # (B, hidden_dim), (B, N)
         slide_embedding = self.head(pooled)               # (B, embed_dim)
-
         if empty_bag is not None and empty_bag.any():
             slide_embedding = slide_embedding.masked_fill(empty_bag.unsqueeze(-1), 0.0)
-
         return slide_embedding, attention
 
 

@@ -22,11 +22,11 @@ log-hazard usado na perda de Cox.
 ```
    TC 3D (NIfTI) ──▶ Ramo A · Radiômico 3D      (MONAI DenseNet121 3D)  ─┐
                                                                         │
-   WSI  ─(offline)▶ embeddings de patches ──▶ Ramo B · Histopatologia   ├─▶ Cross-Modal
-        (Foundation Model de patologia)      (Attention-MIL + Transf.)  │    Attention ──▶ risco
-                                                                        │   (Transformer      (Cox PH)
-   KRAS/TP53/SMAD4/CDKN2A ──▶ Ramo C · Genômico Tabular                 │    + token [FUSION])
-                              (Embedding por gene + MLP)               ─┘
+   WSI  ─(offline)▶ embeddings de patches ──▶ Ramo B · Histopatologia   ├─▶ Co-atenção
+        (Foundation Model de patologia)      (Attention-MIL + Transf.)  │    cross-modal ──▶ risco
+                                                                        │    par-a-par        (Cox PH)
+   KRAS/TP53/SMAD4/CDKN2A ──▶ Ramo C · Genômico Tabular                 │    (MCAT) + [FUSION]
+                              (Embedding por gene)                     ─┘
                                        │
                                        ▼
                          Aprendizado Federado (Flower)
@@ -34,9 +34,10 @@ log-hazard usado na perda de Cox.
 ```
 
 ### Ramo A — Radiômico 3D (`models/branch_a_radiomics.py`)
-- **Entrada:** volume de TC pré-processado, tensor `(B, 1, D, H, W)`.
-- **Backbone:** `DenseNet121` 3D da MONAI; cabeça substituída por projeção para `embed_dim`.
-- **Saída:** `(B, embed_dim)`.
+- **Entrada:** volume de TC pré-processado, `(B, 1, D, H, W)` (ou `(B, 2, …)` para AP+VP).
+- **Backbone:** `DenseNet121` 3D da MONAI.
+- **Saída:** `(B, embed_dim)` — ou `(B, T, embed_dim)` (`return_tokens=True`), sequência
+  de tokens espaciais (`token_grid`, padrão 2×2×2 = 8) para a co-atenção com a histologia.
 - Pré-processamento esperado (offline): resample isotrópico, janelamento HU,
   crop/pad em torno da ROI pancreática.
 
@@ -44,21 +45,29 @@ log-hazard usado na perda de Cox.
 - **Não** processa pixels da WSI. Assume `embeddings` de patches gerados
   **offline** por um *foundation model* de patologia (UNI, CONCH, Prov-GigaPath…).
 - **Entrada:** `(B, N, patch_feat_dim)` + máscara opcional `(B, N)` para *bags* de tamanho variável.
-- **Agregador:** *Attention-Based MIL* (Ilse et al., 2018) com bloco Transformer opcional.
-- **Saída:** `(B, embed_dim)` + pesos de atenção por patch (interpretabilidade).
+- **Agregador:** *Attention-Based MIL* (Ilse et al., 2018) + Transformer; `return_tokens=True`
+  usa `histology_tokens` *slots* aprendíveis → `(B, K, embed_dim)` tokens histológicos.
+- **Saída:** `(B, embed_dim)` (ou `(B, K, embed_dim)`) + pesos de atenção por patch.
 
 ### Ramo C — Genômico Tabular (`models/branch_c_genomics.py`)
 - **Entrada:** `(B, 4)` `long` — status mutacional de `[KRAS, TP53, SMAD4, CDKN2A]`
   (`0` = wild-type, `1` = mutado, `2` = desconhecido/não sequenciado).
-- Um `nn.Embedding` aprendível por `(gene, estado)` + MLP.
-- **Saída:** `(B, embed_dim)`.
+- Um `nn.Embedding` aprendível por `(gene, estado)`.
+- **Saída:** `(B, embed_dim)` (via MLP) — ou `(B, 4, embed_dim)` (`return_tokens=True`),
+  um token por gene *driver*.
+- *TODO:* tipo de variante + frequência alélica (VAF).
 
-### Fusão — Cross-Modal Attention (`models/fusion_attention.py`)
-- Adiciona um *modality token* a cada `embedding`, concatena um token `[FUSION]`
-  (tipo CLS) e passa a sequência de 4 tokens por um Transformer.
-- **Robusto a modalidade ausente:** máscara `(B, 3)` — pacientes sem uma das
-  modalidades continuam sendo processados.
-- **Saída:** `risk (B, n_outputs)` e `fused (B, embed_dim)`.
+### Fusão (`models/fusion_coattention.py` · `fusion_attention.py`)
+Dois modos (`fusion_mode` em `configs/default.yaml`):
+- **`coattention`** (padrão) — `CrossModalCoAttentionFusion`, estilo **MCAT**
+  (Seção 6.1 do artigo): co-atenção **par-a-par e direcional** entre as sequências
+  de tokens (Hist→Rad, Rad→Hist, Genômica como *Query* condicionante, etc.),
+  `Attention(Q,K,V)=softmax(QKᵀ/√dₖ)V`; depois *pooling* por modalidade e leitura
+  por token `[FUSION]`. Retorna também `modality_gate` (contribuição por modalidade).
+- **`transformer`** (legado) — `CrossModalAttentionFusion`, auto-atenção conjunta
+  sobre 1 token por modalidade + `[FUSION]`.
+- **Robusto a modalidade ausente** (por amostra): máscara `(B, 3)`.
+- **Saída:** `risk (B, n_outputs)`, `fused (B, embed_dim)`.
 
 ### Modelo completo (`models/multimodal_pdac.py`)
 `MultimodalPDACModel` orquestra os quatro módulos. É esta `nn.Module` cujos
@@ -92,7 +101,8 @@ pdac_multimodal_fl/
 │   ├── branch_a_radiomics.py
 │   ├── branch_b_histology.py
 │   ├── branch_c_genomics.py
-│   ├── fusion_attention.py
+│   ├── fusion_coattention.py   # co-atenção par-a-par (MCAT) — padrão
+│   ├── fusion_attention.py     # auto-atenção conjunta — legado
 │   └── multimodal_pdac.py
 ├── federated/
 │   ├── server.py
@@ -245,6 +255,19 @@ de cada execução e aparece no painel em *Exportações*.
 ---
 
 ## 7. Roadmap
+
+Alinhamento com a Seção 6.1 do artigo:
+
+- [x] Fusão por **co-atenção cross-modal par-a-par (MCAT)** — `fusion_coattention.py`.
+- [x] Ramo A emite **tokens espaciais**; Ramo B emite **K tokens** histológicos;
+  Ramo C emite **1 token por gene** *driver*.
+- [ ] Ramo A: fases **AP + VP** com encoder compartilhado (hoje: `ct_in_channels=2`).
+- [ ] Ramo C: **tipo de variante + VAF** além do status mutacional.
+- [ ] Regularização de **balanceamento entre modalidades** no treino.
+- [ ] Explicabilidade: **SHAP** (Ramo C + clínico) e **Grad-CAM 3D** (Ramo A).
+- [ ] Cabeças **multitarefa**: diagnóstico + subtipagem molecular + prognóstico.
+
+Geral:
 
 - [ ] Implementar `MultimodalPDACDataset` para o(s) dataset(s) reais.
 - [ ] Pipeline de pré-processamento de TC (MONAI transforms) e extração de patches/embeddings de WSI.

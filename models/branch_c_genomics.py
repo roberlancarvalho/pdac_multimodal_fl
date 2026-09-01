@@ -16,8 +16,14 @@ Codificação de entrada por gene:
 
 Entrada (forward): Tensor long de shape (B, 4)
     -- colunas na ordem: [KRAS, TP53, SMAD4, CDKN2A].
-Saída  (forward): Tensor float32 de shape (B, embed_dim)
-    -- embedding genômico por paciente.
+Saída  (forward):
+    - `return_tokens=False` (padrão): Tensor (B, embed_dim) -- embedding por paciente.
+    - `return_tokens=True`: Tensor (B, n_genes, embed_dim) -- um token por gene
+      driver, para a co-atenção cruzada (a genômica atua como Query condicionante
+      sobre os demais ramos; ver `fusion_coattention.py`).
+
+TODO (item 4 do gap com o artigo): incorporar tipo de variante e frequência
+alélica (VAF) além do status mutacional.
 """
 
 from __future__ import annotations
@@ -60,6 +66,13 @@ class GenomicsBranch(nn.Module):
             "gene_offsets", torch.arange(n_genes) * n_states, persistent=False
         )
 
+        # Projeção de cada gene para um token na dimensão compartilhada (co-atenção).
+        self.token_proj = nn.Sequential(
+            nn.Linear(gene_embed_dim, embed_dim),
+            nn.GELU(),
+            nn.LayerNorm(embed_dim),
+        )
+
         self.mlp = nn.Sequential(
             nn.Linear(n_genes * gene_embed_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -71,20 +84,27 @@ class GenomicsBranch(nn.Module):
             nn.Linear(embed_dim, embed_dim),
         )
 
-    def forward(self, mutation_status: torch.Tensor) -> torch.Tensor:
-        """Gera o embedding genômico.
+    def forward(
+        self, mutation_status: torch.Tensor, return_tokens: bool = False
+    ) -> torch.Tensor:
+        """Gera a representação genômica.
 
         Args:
             mutation_status: Tensor long (B, n_genes) com valores em {0, 1, (2)}.
+            return_tokens: Se True, devolve (B, n_genes, embed_dim) (um token/gene).
 
         Returns:
-            Tensor (B, embed_dim) com o embedding genômico.
+            (B, embed_dim) se `return_tokens=False`; (B, n_genes, embed_dim) caso contrário.
         """
         if mutation_status.dtype != torch.long:
             mutation_status = mutation_status.long()
 
         indices = mutation_status + self.gene_offsets  # (B, n_genes)
         gene_vecs = self.gene_state_embed(indices)     # (B, n_genes, gene_embed_dim)
+
+        if return_tokens:
+            return self.token_proj(gene_vecs)          # (B, n_genes, embed_dim)
+
         flat = gene_vecs.flatten(start_dim=1)          # (B, n_genes * gene_embed_dim)
         return self.mlp(flat)                          # (B, embed_dim)
 
@@ -93,5 +113,5 @@ if __name__ == "__main__":
     model = GenomicsBranch(embed_dim=256)
     # 2 pacientes: um KRAS+TP53 mutados; outro KRAS mutado e SMAD4 desconhecido
     x = torch.tensor([[1, 1, 0, 0], [1, 0, 2, 0]])
-    out = model(x)
-    print("Ramo C -- saída:", out.shape)  # esperado: torch.Size([2, 256])
+    print("Ramo C -- vetor:", model(x).shape)                     # (2, 256)
+    print("Ramo C -- tokens:", model(x, return_tokens=True).shape)  # (2, 4, 256)
