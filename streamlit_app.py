@@ -14,19 +14,93 @@ from __future__ import annotations
 from pathlib import Path
 
 import streamlit as st
+from streamlit_sortables import sort_items
 
-from dashboard import attention_tab, tour, training_tab, xai_tab
+from dashboard import attention_tab, data_tab, tour, training_tab, xai_tab
 from dashboard.io import list_runs, read_json
 from dashboard.process import launch_run, proc_alive, stop_run
+from dashboard.training_tab import HIDDEN_HEADER, VISIBLE_HEADER, default_kpi_layout
 
 st.set_page_config(page_title="PDAC FL — painel", page_icon=":material/hub:", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetric"] {
+        background: var(--secondary-background-color);
+        border: 1px solid var(--border-color, rgba(128, 128, 128, .18));
+        border-top: 3px solid var(--primary-color);
+        border-radius: 10px;
+        padding: .9rem 1.1rem .6rem;
+        transition: transform .15s ease, box-shadow .15s ease;
+    }
+    div[data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, .15);
+    }
+    div[data-testid="stMetricLabel"] { opacity: .8; letter-spacing: .02em; }
+    div[data-testid="stMetricValue"] { font-weight: 700; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+_SORTABLE_CSS = """
+.sortable-container {
+    background-color: var(--secondary-background-color, rgba(128, 128, 128, .06));
+    border: 1px solid var(--border-color, rgba(128, 128, 128, .25));
+    border-radius: 10px;
+    padding: 8px;
+    min-height: 44px;
+}
+.sortable-container-header {
+    font-weight: 600;
+    font-size: .85rem;
+    margin-bottom: 6px;
+}
+.sortable-item {
+    background-color: var(--primary-color, #3B7DD8);
+    color: white;
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    font-size: .85rem;
+    cursor: grab;
+}
+.sortable-item:active { cursor: grabbing; }
+"""
+
+if st.session_state.pop("_reset_kpi_layout", False):
+    # Precisa rodar antes do componente key="kpi_sortable" ser criado nesta
+    # execução -- Streamlit proíbe reatribuir session_state de um widget já instanciado.
+    st.session_state.kpi_layout = default_kpi_layout()
 
 with st.sidebar:
     if st.button("Tour do painel", icon=":material/help:", width="stretch",
                   help="Reabre a introdução passo a passo do painel."):
         tour.open_now()
         st.rerun()
+
+    with st.popover("🎛️ Personalizar cards", width="stretch"):
+        st.caption(
+            "Arraste os cards entre as colunas para reordenar ou esconder "
+            "(aba **Treino federado**)."
+        )
+        layout = st.session_state.get("kpi_layout") or default_kpi_layout()
+        result = sort_items(
+            [
+                {"header": VISIBLE_HEADER, "items": layout[VISIBLE_HEADER]},
+                {"header": HIDDEN_HEADER, "items": layout[HIDDEN_HEADER]},
+            ],
+            multi_containers=True,
+            direction="vertical",
+            key="kpi_sortable",
+            custom_style=_SORTABLE_CSS,
+        )
+        st.session_state.kpi_layout = {d["header"]: d["items"] for d in result}
+        if st.button("Restaurar padrão", width="stretch"):
+            st.session_state._reset_kpi_layout = True
+            st.rerun()
 
     st.subheader("Configuração da simulação")
 
@@ -103,9 +177,14 @@ with st.sidebar:
             stop_run()
             st.rerun()
 
+    manifest_path = st.session_state.get("data_manifest_path", "")
     st.caption(
         "A 1ª rodada leva ~1 min (subida do Ray + DenseNet3D em CPU). "
-        "Dados do `SyntheticPDACDataset` — serve para validar o pipeline."
+        + (
+            f"Usando o manifesto em **{manifest_path}** (aba **Dados**)."
+            if manifest_path
+            else "Dados do `SyntheticPDACDataset` — ajuste em **Dados**, na aba, para usar dados reais."
+        )
     )
 
 if submitted:
@@ -127,7 +206,8 @@ if submitted:
             "data": {
                 "synthetic_samples": synthetic_samples,
                 "modality_dropout": modality_dropout,
-                "manifest_csv": "",
+                "manifest_csv": st.session_state.get("data_manifest_path", ""),
+                "data_root": st.session_state.get("data_root", "./data/processed"),
             },
         },
         num_clients=num_clients,
@@ -142,32 +222,46 @@ st.title("Pipeline Multimodal Federado — PDAC")
 st.caption("Dispare e acompanhe o treino federado. Novo por aqui? Veja o **❔ Tour do painel** na barra lateral.")
 
 runs = list_runs()
-if not runs:
-    st.info("Nenhuma execução ainda. Configure os parâmetros na barra lateral e clique em **Iniciar simulação**.")
-    st.stop()
-
-run_keys = [str(p) for p in runs]
-default_idx = run_keys.index(st.session_state["active_run"]) if st.session_state.get("active_run") in run_keys else 0
-selected_run = Path(
-    st.selectbox(
-        "Execução", run_keys, index=default_idx, format_func=lambda k: Path(k).name,
-        help="Cada run vive em outputs/<run>/. Selecione para reabrir ou comparar execuções anteriores.",
+selected_run: Path | None = None
+if runs:
+    run_keys = [str(p) for p in runs]
+    default_idx = run_keys.index(st.session_state["active_run"]) if st.session_state.get("active_run") in run_keys else 0
+    selected_run = Path(
+        st.selectbox(
+            "Execução", run_keys, index=default_idx, format_func=lambda k: Path(k).name,
+            help="Cada run vive em outputs/<run>/. Selecione para reabrir ou comparar execuções anteriores.",
+        )
     )
+else:
+    st.info(
+        "Nenhuma execução ainda. Configure os parâmetros na barra lateral e clique em "
+        "**Iniciar simulação** -- ou prepare seus dados na aba **Dados** enquanto isso."
+    )
+
+tab_train, tab_attention, tab_xai, tab_data = st.tabs(
+    ["Treino federado", "Atenção — histopatologia", "Explicabilidade — SHAP · Grad-CAM", "Dados"]
 )
 
-tab_train, tab_attention, tab_xai = st.tabs(
-    ["Treino federado", "Atenção — histopatologia", "Explicabilidade — SHAP · Grad-CAM"]
-)
+with tab_data:
+    data_tab.render(selected_run)
 
 with tab_train:
-    if (read_json(selected_run / "status.json") or {}).get("state") == "running":
+    if selected_run is None:
+        st.caption("Nenhuma execução ainda.")
+    elif (read_json(selected_run / "status.json") or {}).get("state") == "running":
         st.session_state.was_running = True
         st.fragment(run_every=2)(training_tab.render)(selected_run)
     else:
         training_tab.render(selected_run)
 
 with tab_attention:
-    attention_tab.render(selected_run)
+    if selected_run is None:
+        st.caption("Nenhuma execução ainda.")
+    else:
+        attention_tab.render(selected_run)
 
 with tab_xai:
-    xai_tab.render(selected_run)
+    if selected_run is None:
+        st.caption("Nenhuma execução ainda.")
+    else:
+        xai_tab.render(selected_run)

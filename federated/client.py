@@ -43,6 +43,12 @@ from utils.common import (
     set_seed,
 )
 
+# Cada cliente roda num ator Ray próprio; sem isso, todo ator tenta usar todos
+# os núcleos da CPU e a simulação com vários clientes vira thread-thrashing.
+# federated/simulation.py reparte os núcleos disponíveis entre os clientes e
+# passa a cota de cada um por env var (1 se rodar fora da simulação/CLI).
+torch.set_num_threads(int(os.environ.get("PDAC_TORCH_THREADS", "1")))
+
 
 def build_dataloaders(cfg: dict, cid: int, num_clients: int):
     """Cria os loaders de treino/validação para o cliente `cid`.

@@ -53,9 +53,11 @@ def _gradcam_tab(model_path: Path) -> None:
     c1, c2 = st.columns(2)
     with c1, st.container(border=True):
         st.markdown("**TC sintética (fatia)**")
+        st.caption("Entrada original do Ramo A, sem realce.")
         st.image(slice_, clamp=True, width="stretch")
     with c2, st.container(border=True):
         st.markdown("**Grad-CAM sobreposto**")
+        st.caption("Vermelho = região que mais empurrou o risco predito para cima.")
         st.image(np.stack([slice_] * 3, axis=-1), clamp=True, width="stretch")
         st.image(overlay, clamp=True, width="stretch")
 
@@ -83,11 +85,11 @@ def _genomic_shap_tab(model_path: Path) -> None:
 
     df = pd.DataFrame({"gene": res["genes"], "shap": res["shap"]})
     with st.container(border=True):
-        st.subheader(
-            "Contribuição de cada gene driver",
-            help="Quanto a mutação de cada gene desloca o log-hazard predito em "
-            "relação ao paciente todo wild-type. Soma dos SHAP + risco base = risco predito.",
-            divider=False,
+        st.subheader("Contribuição de cada gene driver", divider=False)
+        st.caption(
+            "Quanto a mutação de cada gene desloca o risco em relação ao paciente todo "
+            "*wild-type*. 🔴 empurra o risco pra cima, 🔵 empurra pra baixo. "
+            "Soma dos SHAP + risco base = risco predito."
         )
         st.altair_chart(signed_shap_chart(df, "gene"), width="stretch")
 
@@ -126,11 +128,10 @@ def _clinical_shap_tab(model_path: Path, cfg: dict) -> None:
 
     df = pd.DataFrame({"campo": res["fields"], "shap": res["shap"]})
     with st.container(border=True):
-        st.subheader(
-            "Contribuição de cada variável clínica",
-            help="Deslocamento do log-hazard vs. o paciente de referência "
-            "(contínuas na média, categóricas na categoria 0).",
-            divider=False,
+        st.subheader("Contribuição de cada variável clínica", divider=False)
+        st.caption(
+            "Deslocamento do risco vs. um paciente de referência (contínuas na média, "
+            "categóricas na categoria 0). 🔴 empurra o risco pra cima, 🔵 pra baixo."
         )
         st.altair_chart(signed_shap_chart(df, "campo"), width="stretch")
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from dashboard.charts import round_line_chart
 from dashboard.io import client_labels, read_history, read_json
 
 _STATE_BADGE = {
@@ -54,113 +55,125 @@ def _status_line(cfg: dict, status: dict) -> None:
     row.markdown(f"**Estratégia:** {strategy_line}")
     row.markdown(f"**Tempo:** {status.get('elapsed_s', 0)}s")
     if total_rounds:
-        st.progress(min(int(status.get("current_round", 0)) / total_rounds, 1.0))
+        pct = min(int(status.get("current_round", 0)) / total_rounds, 1.0)
+        st.progress(pct, text=f"{pct:.0%}")
+
+
+# Catálogo de cards de KPI -- usado tanto para renderizar quanto para o drawer
+# de personalização (barra lateral) escolher quais mostrar e em que ordem.
+KPI_CARDS: dict[str, str] = {
+    "c_index": "C-index global",
+    "eval_loss": "Perda de Cox (avaliação)",
+    "train_loss": "Perda de Cox (treino)",
+    "auc_dx": "AUC — diagnóstico",
+    "acc_subtype": "Acurácia — subtipo molecular",
+    "central_c_index": "C-index — validação central",
+    "central_auc_dx": "AUC diag. — validação central",
+}
+LABEL_TO_ID: dict[str, str] = {label: cid for cid, label in KPI_CARDS.items()}
+VISIBLE_HEADER = "Visíveis"
+HIDDEN_HEADER = "Ocultos"
+
+
+def default_kpi_layout() -> dict[str, list[str]]:
+    return {VISIBLE_HEADER: list(KPI_CARDS.values()), HIDDEN_HEADER: []}
+
+_CARD_HELP: dict[str, str] = {
+    "c_index": "Concordância de Harrell agregada entre os clientes: probabilidade de o "
+    "paciente com maior risco predito ter o evento antes. 0,5 = acaso · 1,0 = ordenação perfeita.",
+    "eval_loss": "Negative partial log-likelihood de Cox no conjunto de validação de cada "
+    "cliente, agregada. Menor é melhor.",
+    "train_loss": "Mesma perda, medida durante o treino local antes da agregação.",
+    "auc_dx": "Área sob a curva ROC da cabeça de diagnóstico (PDAC vs não-PDAC), agregada "
+    "entre os clientes (Figura 4).",
+    "acc_subtype": "Acurácia da cabeça de subtipagem (classical vs basal-like) sobre os "
+    "pacientes com subtipo conhecido.",
+    "central_c_index": "Modelo global avaliado no servidor sobre uma coorte held-out "
+    "(validação centralizada / independente).",
+    "central_auc_dx": "Mesma AUC de diagnóstico, medida na coorte held-out do servidor.",
+}
+_INVERSE_CARDS = {"eval_loss", "train_loss"}
+
+
+def _sparkline(hist: pd.DataFrame, col: str) -> list[float] | None:
+    if col not in hist:
+        return None
+    return hist[col].dropna().tolist() or None
+
+
+def _build_card(card_id: str, last: pd.Series, prev: pd.Series, hist: pd.DataFrame) -> dict | None:
+    if card_id not in hist:
+        return None
+    kwargs = dict(
+        label=KPI_CARDS[card_id],
+        value=f"{_as_float(last.get(card_id)):.4f}",
+        delta=_delta(last.get(card_id), prev.get(card_id)),
+        chart_data=_sparkline(hist, card_id),
+        help=_CARD_HELP.get(card_id, ""),
+    )
+    if card_id in _INVERSE_CARDS:
+        kwargs["delta_color"] = "inverse"
+    return kwargs
+
+
+def _metric_row(items: list[dict]) -> None:
+    """Uma linha com exatamente `len(items)` colunas -- nunca sobra card órfão."""
+    for col, item in zip(st.columns(len(items)), items, strict=True):
+        col.metric(**item, border=True, chart_type="line")
 
 
 def _kpi_row(last: pd.Series, prev: pd.Series, hist: pd.DataFrame) -> None:
-    spark = hist["c_index"].dropna().tolist() if "c_index" in hist else None
-    kpis = st.container(horizontal=True)
-    kpis.metric(
-        "C-index global",
-        f"{_as_float(last.get('c_index')):.4f}",
-        _delta(last.get("c_index"), prev.get("c_index")),
-        border=True,
-        chart_data=spark or None,
-        chart_type="line",
-        help="Concordância de Harrell agregada entre os clientes: probabilidade "
-        "de o paciente com maior risco predito ter o evento antes. "
-        "0,5 = acaso · 1,0 = ordenação perfeita.",
+    st.caption(
+        "Δ compara com a rodada anterior. Arraste os cards em **🎛️ Personalizar cards**, "
+        "na barra lateral, para reordenar ou esconder."
     )
-    kpis.metric(
-        "Perda de Cox (avaliação)",
-        f"{_as_float(last.get('eval_loss')):.4f}",
-        _delta(last.get("eval_loss"), prev.get("eval_loss")),
-        delta_color="inverse",
-        border=True,
-        help="Negative partial log-likelihood de Cox no conjunto de validação "
-        "de cada cliente, agregada. Menor é melhor.",
-    )
-    kpis.metric(
-        "Perda de Cox (treino)",
-        f"{_as_float(last.get('train_loss')):.4f}",
-        _delta(last.get("train_loss"), prev.get("train_loss")),
-        delta_color="inverse",
-        border=True,
-        help="Mesma perda, medida durante o treino local antes da agregação.",
-    )
-
-    if "auc_dx" in hist:
-        task_kpis = st.container(horizontal=True)
-        task_kpis.metric(
-            "AUC — diagnóstico",
-            f"{_as_float(last.get('auc_dx')):.4f}",
-            _delta(last.get("auc_dx"), prev.get("auc_dx")),
-            border=True,
-            help="Área sob a curva ROC da cabeça de diagnóstico (PDAC vs não-PDAC), "
-            "agregada entre os clientes (Figura 4).",
-        )
-        task_kpis.metric(
-            "Acurácia — subtipo molecular",
-            f"{_as_float(last.get('acc_subtype')):.4f}",
-            _delta(last.get("acc_subtype"), prev.get("acc_subtype")),
-            border=True,
-            help="Acurácia da cabeça de subtipagem (classical vs basal-like) "
-            "sobre os pacientes com subtipo conhecido.",
-        )
-
-    if "central_c_index" in hist:
-        central_kpis = st.container(horizontal=True)
-        central_kpis.metric(
-            "C-index — validação central",
-            f"{_as_float(last.get('central_c_index')):.4f}",
-            _delta(last.get("central_c_index"), prev.get("central_c_index")),
-            border=True,
-            help="Modelo global avaliado no servidor sobre uma coorte held-out "
-            "(validação centralizada / independente).",
-        )
-        if "central_auc_dx" in hist:
-            central_kpis.metric(
-                "AUC diag. — validação central",
-                f"{_as_float(last.get('central_auc_dx')):.4f}",
-                _delta(last.get("central_auc_dx"), prev.get("central_auc_dx")),
-                border=True,
-            )
+    layout = st.session_state.get("kpi_layout") or default_kpi_layout()
+    order = [LABEL_TO_ID[label] for label in layout.get(VISIBLE_HEADER, []) if label in LABEL_TO_ID]
+    cards = [card for cid in order if (card := _build_card(cid, last, prev, hist)) is not None]
+    if not cards:
+        st.info("Nenhum card selecionado -- escolha em 🎛️ Personalizar cards, na barra lateral.")
+        return
+    for i in range(0, len(cards), 3):
+        _metric_row(cards[i : i + 3])
 
 
 def _round_charts(hist: pd.DataFrame) -> None:
     c1, c2 = st.columns(2)
     with c1, st.container(border=True):
-        st.subheader(
-            "C-index por rodada",
-            help="Distribuído = média ponderada dos clientes. Central = modelo "
-            "global na coorte do servidor. A linha pontilhada em 0,5 marca o acaso.",
-            divider=False,
+        st.subheader("C-index por rodada", divider=False)
+        st.caption(
+            "1,0 = ordenação perfeita do risco · 0,5 (linha pontilhada) = acaso. "
+            "**Distribuído** = média dos clientes · **central** = modelo global na coorte do servidor. "
+            "Arraste/role para dar zoom."
         )
         cols = [c for c in ("c_index", "central_c_index") if c in hist]
-        st.line_chart(hist, x="round", y=cols, height=280)
+        labels = {"c_index": "distribuído", "central_c_index": "central"}
+        st.altair_chart(
+            round_line_chart(hist, cols, labels, "C-index", baseline=0.5, baseline_label="acaso"),
+            width="stretch",
+        )
     with c2, st.container(border=True):
-        st.subheader(
-            "Perda de Cox por rodada",
-            help="Treino vs. avaliação. Divergência entre as duas curvas "
-            "sugere overfitting local.",
-            divider=False,
+        st.subheader("Perda de Cox por rodada", divider=False)
+        st.caption(
+            "Menor é melhor. **Treino** vs. **avaliação** — se avaliação sobe enquanto "
+            "treino cai, é sinal de overfitting local."
         )
         cols = [c for c in ("train_loss", "eval_loss") if c in hist]
-        st.line_chart(hist, x="round", y=cols, height=280)
+        labels = {"train_loss": "treino", "eval_loss": "avaliação"}
+        st.altair_chart(round_line_chart(hist, cols, labels, "perda de Cox"), width="stretch")
 
 
 def _client_table(hist: pd.DataFrame, last: pd.Series) -> None:
     with st.container(border=True):
-        st.subheader(
-            "Métricas por cliente (instituição) — última rodada",
-            help="Como cada nó federado se saiu. Heterogeneidade grande entre "
-            "clientes indica dados não-IID — considere FedProx.",
-            divider=False,
-        )
+        st.subheader("Métricas por cliente (instituição) — última rodada", divider=False)
         per_client = last.get("eval_clients") or []
         if not per_client:
             st.caption("Sem métricas por cliente nesta rodada.")
             return
+        st.caption(
+            "Como cada instituição se saiu isoladamente. Barras muito desiguais no C-index "
+            "indicam dados não-IID entre clientes — considere a estratégia FedProx."
+        )
 
         labels = client_labels(hist)
         fit_loss = {c["cid"]: c.get("train_loss") for c in (last.get("fit_clients") or [])}
@@ -181,8 +194,9 @@ def _client_table(hist: pd.DataFrame, last: pd.Series) -> None:
             hide_index=True,
             width="stretch",
             column_config={
-                col: st.column_config.NumberColumn(format="%.4f")
-                for col in ("perda Cox (treino)", "perda Cox (val)", "C-index")
+                "perda Cox (treino)": st.column_config.NumberColumn(format="%.4f"),
+                "perda Cox (val)": st.column_config.NumberColumn(format="%.4f"),
+                "C-index": st.column_config.ProgressColumn(format="%.4f", min_value=0.0, max_value=1.0),
             },
         )
 
@@ -194,12 +208,10 @@ def _modality_gate_chart(hist: pd.DataFrame) -> None:
     if gate_hist.empty:
         return
     with st.container(border=True):
-        st.subheader(
-            "Contribuição por modalidade (co-atenção)",
-            help="Peso médio do token [FUSION] sobre cada modalidade na leitura "
-            "final. Barras equilibradas indicam que a regularização de "
-            "balanceamento está evitando dominância de uma modalidade.",
-            divider=False,
+        st.subheader("Contribuição por modalidade (co-atenção)", divider=False)
+        st.caption(
+            "Peso médio do token [FUSION] sobre cada modalidade. Barras equilibradas = a "
+            "regularização de balanceamento está evitando que uma modalidade domine sozinha."
         )
         rows = [
             {"rodada": r["round"], "modalidade": mod, "peso": val}

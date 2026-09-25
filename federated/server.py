@@ -96,8 +96,13 @@ def make_central_eval_fn(cfg: dict):
             modality_dropout=cfg["data"]["modality_dropout"],
             seed=int(ce.get("seed", 999)),
         )
+    # Avaliação roda sob @torch.no_grad() (federated/engine.py) -- sem ativações
+    # de backward pra guardar, dá pra usar um batch bem maior que o de treino e
+    # cortar o nº de passes sequenciais no processo do servidor (sem paralelismo
+    # dos clientes). Isso era o maior gargalo de tempo por rodada.
+    eval_batch_size = max(int(cfg["train"]["batch_size"]) * 4, 16)
     loader = DataLoader(
-        dataset, batch_size=cfg["train"]["batch_size"], shuffle=False,
+        dataset, batch_size=eval_batch_size, shuffle=False,
         collate_fn=collate_multimodal,
     )
     model = MultimodalPDACModel(**cfg["model"]).to(device)

@@ -59,21 +59,22 @@ def render(run_dir: Path) -> None:
 
     c1, c2 = st.columns([2, 3])
     with c1, st.container(border=True):
-        st.subheader(
-            f"Top-{top_k} patches por atenção",
-            help="Os patches que mais pesaram no embedding da lâmina.",
-            divider=False,
-        )
+        st.subheader(f"Top-{top_k} patches por atenção", divider=False)
+        st.caption("Os patches que mais pesaram no embedding final da lâmina.")
         st.dataframe(
             df_attn.nlargest(top_k, "atencao").reset_index(drop=True),
             hide_index=True,
             width="stretch",
+            column_config={
+                "atencao": st.column_config.ProgressColumn(
+                    format="%.4f", min_value=0.0, max_value=float(attn.max())
+                ),
+            },
         )
     with c2, st.container(border=True):
-        st.subheader(
-            "Mapa de atenção (grade pseudo-espacial)",
-            help="Os patches são dispostos numa grade só para visualização — "
-            "não corresponde à posição real na lâmina.",
-            divider=False,
+        st.subheader("Mapa de atenção (grade pseudo-espacial)", divider=False)
+        st.caption(
+            "Mais claro = maior peso de atenção. Os patches são dispostos numa grade só "
+            "para visualização — não corresponde à posição real na lâmina."
         )
         st.altair_chart(attention_heatmap(attn), width="stretch")

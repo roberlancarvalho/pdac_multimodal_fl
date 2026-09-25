@@ -48,6 +48,13 @@ def main() -> None:
     cfg["federated"]["min_evaluate_clients"] = args.num_clients
     cfg["federated"]["min_available_clients"] = args.num_clients
 
+    # Deixa 1 núcleo livre para o painel (Streamlit) não travar durante a
+    # simulação, e reparte o resto entre os clientes que rodam em paralelo --
+    # em vez de travar todo mundo em 1 thread (CPU ociosa com poucos clientes
+    # numa máquina com muitos núcleos). PDAC_TORCH_THREADS é lido em client.py.
+    reserved_cpus = max(1, (os.cpu_count() or 2) - 1)
+    os.environ["PDAC_TORCH_THREADS"] = str(max(1, reserved_cpus // args.num_clients))
+
     def client_fn(context: fl.common.Context) -> fl.client.Client:
         cid = int(context.node_config["partition-id"])
         return MultimodalPDACClient(cfg, cid, args.num_clients).to_client()
@@ -69,6 +76,8 @@ def main() -> None:
             num_clients=args.num_clients,
             config=fl.server.ServerConfig(num_rounds=num_rounds),
             strategy=strategy,
+            client_resources={"num_cpus": 1},
+            ray_init_args={"num_cpus": reserved_cpus, "include_dashboard": False},
         )
     except Exception as exc:
         if recorder is not None:
