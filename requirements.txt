@@ -3,6 +3,9 @@
 # adequada à sua máquina: https://pytorch.org/get-started/locally/
 
 # --- Núcleo: deep learning ---
+# CPU-only wheels: builds na nuvem (ex. Streamlit Community Cloud) não têm GPU
+# e o wheel CUDA do PyPI é grande demais / estoura o tempo de build.
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.2
 torchvision>=0.17
 
